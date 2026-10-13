@@ -178,105 +178,46 @@ def audio_args(mapping: str) -> list[str]:
     ]
 
 
-_gst_cache: dict[tuple[str, str], bool] = {}
-
-
-def inspect_env(binary: str) -> dict[str, str] | None:
-    if binary != "gst-launch-1.0":
-        return None
-    env = os.environ.copy()
-    for key in ("GST_PLUGIN_PATH", "GST_PLUGIN_SYSTEM_PATH", "LD_LIBRARY_PATH"):
-        env.pop(key, None)
-    return env
-
-
-def gst_has(binary: str, element: str) -> bool:
-    key = (binary, element)
-    if key in _gst_cache:
-        return _gst_cache[key]
-    inspect = str(Path(binary).with_name("gst-inspect-1.0"))
-    try:
-        result = subprocess.run(
-            [inspect, element],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=8,
-            env=inspect_env(binary),
-        )
-    except (OSError, subprocess.SubprocessError):
-        _gst_cache[key] = False
-        return False
-    _gst_cache[key] = result.returncode == 0
-    return _gst_cache[key]
-
-
-def preview_launch() -> str | None:
-    host = cfg("GST_LAUNCH", "gst-launch-1.0")
-    candidates = [host] if host != "gst-launch-1.0" else []
-    candidates.append("gst-launch-1.0")
-    for binary in candidates:
-        if gst_has(binary, "x264enc") and gst_has(binary, "opusenc") and gst_has(binary, "rtspclientsink"):
-            return binary
-        if gst_has(binary, "openh264enc") and gst_has(binary, "opusenc") and gst_has(binary, "rtspclientsink"):
-            return binary
-    return None
-
-
-def video_encoder(binary: str) -> list[str] | None:
-    if gst_has(binary, "x264enc"):
-        return [
-            "x264enc", "tune=zerolatency", "speed-preset=ultrafast",
-            "bitrate=700", "key-int-max=25", "bframes=0",
-            "option-string=profile=baseline", "!",
-            "h264parse", "config-interval=-1",
-        ]
-    if gst_has(binary, "openh264enc"):
-        return [
-            "openh264enc", "bitrate=700000", "complexity=low", "!",
-            "h264parse", "config-interval=-1",
-        ]
-    return None
-
-
-def preview_audio_args(mapping: str) -> list[str]:
-    tail = ["audio/x-raw,rate=48000,channels=2", "!", "opusenc", "bitrate=64000"]
-    if mapping == "1-2":
-        return ["audioconvert", "!", "audioresample", "!", *tail]
-    prop = matrix_property()
-    return [
-        "audioconvert", "!", "audio/x-raw,channels=2", "!",
-        "audiomixmatrix", "mode=manual", "in-channels=2", "out-channels=2",
-        f'{prop}="{MATRICES[mapping]}"', "!",
-        "audioconvert", "!", "audioresample", "!",
-        *tail,
-    ]
-
-
 def preview_args(slot_id: str) -> list[str] | None:
-    binary = preview_launch()
-    if binary is None:
-        return None
-    encoder = video_encoder(binary)
-    if encoder is None:
+    binary = "/usr/bin/ffmpeg"
+    if not Path(binary).is_file():
         return None
     slot = state[slot_id]
-    location = f"{cfg('RTSP_BASE', 'rtsp://127.0.0.1:8554').rstrip('/')}/{slot['source']}"
-    publish = f"{cfg('RTSP_BASE', 'rtsp://127.0.0.1:8554').rstrip('/')}/{slot_id}"
-    return [
-        binary, "-e",
-        "rtspsrc", f"location={location}", "latency=200", "protocols=tcp", "name=src",
-        "rtspclientsink", "name=pub", f"location={publish}", "protocols=tcp",
-        "src.", "!", "application/x-rtp,media=video", "!", "decodebin", "!",
-        "queue", "max-size-buffers=2", "leaky=downstream", "!",
-        "videoconvert", "!", "videoscale", "!", "videorate", "!",
-        "video/x-raw,width=640,height=360,framerate=25/1", "!",
-        *encoder, "!",
-        "rtph264pay", "config-interval=-1", "pt=96", "!", "queue", "!", "pub.",
-        "src.", "!", "application/x-rtp,media=audio", "!", "decodebin", "!",
-        "queue", "max-size-buffers=2", "leaky=downstream", "!",
-        *preview_audio_args(slot["audio"]), "!",
-        "rtpopuspay", "pt=97", "!", "queue", "!", "pub.",
+    base = cfg("RTSP_BASE", "rtsp://127.0.0.1:8554").rstrip("/")
+    # Preview terpisah dari kartu SDI. Gambar diperkecil, audio mengikuti peta
+    # yang sama, lalu dipublish supaya browser bisa mendengarnya.
+    filters = {
+        "1-1": "pan=stereo|c0=c0|c1=c0",
+        "2-2": "pan=stereo|c0=c1|c1=c1",
+    }
+    args = [
+        binary, "-nostdin", "-hide_banner", "-loglevel", "warning",
+        "-rtsp_transport", "tcp",
+        "-i", f"{base}/{slot['source']}",
+        "-map", "0:v:0",
+        "-map", "0:a:0?",
+        "-vf", "scale=640:360,fps=25",
     ]
+    if slot["audio"] in filters:
+        args.extend(["-af", filters[slot["audio"]]])
+    args.extend([
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-tune", "zerolatency",
+        "-profile:v", "baseline",
+        "-bf", "0",
+        "-g", "25",
+        "-pix_fmt", "yuv420p",
+        "-b:v", "800k",
+        "-c:a", "libopus",
+        "-b:a", "64k",
+        "-ar", "48000",
+        "-ac", "2",
+        "-f", "rtsp",
+        "-rtsp_transport", "tcp",
+        f"{base}/{slot_id}",
+    ])
+    return args
 
 
 def pipeline_args(slot_id: str) -> list[str]:
@@ -432,8 +373,8 @@ def start_preview(slot_id: str) -> None:
     args = preview_args(slot_id)
     if args is None:
         run["preview_error"] = (
-            "Preview SDI butuh encoder H.264. Di server jalankan: "
-            "sudo apt install gstreamer1.0-plugins-ugly"
+            "Preview SDI butuh FFmpeg di image operator. "
+            "Di server jalankan: docker compose up -d --build"
         )
         return
     generation = run["preview_generation"]
@@ -448,7 +389,6 @@ def start_preview(slot_id: str) -> None:
             stdout=log,
             stderr=subprocess.STDOUT,
             start_new_session=os.name == "posix",
-            env=inspect_env(args[0]),
         )
     except OSError as exc:
         log.write(f"\nGagal menjalankan preview: {exc}\n")
