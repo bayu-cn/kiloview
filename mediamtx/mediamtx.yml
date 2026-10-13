@@ -1,0 +1,25 @@
+# IP LAN server. Dipakai browser di PC operator untuk preview WebRTC.
+webrtcAdditionalHosts: [172.17.20.46]
+
+# API kontrol, dipakai nanti oleh halaman drag-and-drop.
+api: true
+apiAddress: :9997
+
+# KiloLink yang listen. MediaMTX yang memanggil (mode=listener = sisi KiloLink).
+# Satu path per P3 Mini. Latency SRT diset di streaming service KiloLink (120 ms).
+paths:
+  p3-1:
+    source: srt://127.0.0.1:3001?mode=listener
+    sourceOnDemand: false
+
+  p3-2:
+    source: srt://127.0.0.1:3002?mode=listener
+    sourceOnDemand: false
+
+  p3-3:
+    source: srt://127.0.0.1:3003?mode=listener
+    sourceOnDemand: false
+
+  p3-4:
+    source: srt://127.0.0.1:3004?mode=listener
+    sourceOnDemand: false

@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Operator Kiloview</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header>
+    <div>
+      <p class="eyebrow">Feeddesk</p>
+      <h1>Operator Kiloview</h1>
+    </div>
+    <div class="who">
+      <span id="user"></span>
+      <a id="logout" href="/logout" hidden>Keluar</a>
+    </div>
+  </header>
+
+  <main>
+    <section>
+      <div class="section-head">
+        <h2>Sumber</h2>
+        <p>Klik gambar untuk mendengar suaranya. Seret nama sumber ke slot SDI.</p>
+      </div>
+      <div id="sources" class="sources"></div>
+    </section>
+
+    <section>
+      <div class="section-head">
+        <h2>Keluaran SDI</h2>
+        <p>Server hanya men-decode sumber yang sedang mengisi slot ini.</p>
+      </div>
+      <div id="slots" class="slots"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

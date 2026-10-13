@@ -1,0 +1,10 @@
+# MediaMTX di mesin yang sama dengan KiloLink.
+# network_mode host supaya 127.0.0.1 di sini = server, bukan localhost container.
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:1
+    container_name: mediamtx
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro

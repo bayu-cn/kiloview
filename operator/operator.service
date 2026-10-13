@@ -1,0 +1,16 @@
+[Unit]
+Description=Kiloview operator
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/storage/operator
+EnvironmentFile=/storage/operator/config.env
+ExecStart=/usr/bin/python3 /storage/operator/app.py
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

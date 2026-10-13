@@ -1,0 +1,19 @@
+# Butuh driver Blackmagic yang sudah jalan di host, karena kartu SDI tidak bisa
+# dipindah ke dalam image. Network host supaya 127.0.0.1 menuju MediaMTX.
+services:
+  operator:
+    build: .
+    image: kiloview-operator
+    container_name: operator
+    restart: unless-stopped
+    network_mode: host
+    privileged: true
+    environment:
+      DATA_DIR: /data
+      LD_LIBRARY_PATH: /usr/lib/blackmagic/DesktopVideo:/usr/lib
+    volumes:
+      - ./config.env:/app/config.env:ro
+      - ./data:/data
+      - /dev:/dev
+      - /usr/lib:/host-usr-lib:ro
+      - /usr/lib/blackmagic:/usr/lib/blackmagic:ro
