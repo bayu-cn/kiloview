@@ -344,11 +344,13 @@ function paint() {
     audio.disabled = busy;
     box.querySelector("[data-clear]").disabled = busy || !slot.source;
     const log = box.querySelector("[data-log]");
-    log.hidden = slot.status !== "error" || !slot.error;
-    log.textContent = slot.error || "";
+    const errorText = slot.error || "";
+    log.hidden = slot.status !== "error" || !errorText;
+    if (log.textContent !== errorText) log.textContent = errorText;
     const note = box.querySelector("[data-preview-note]");
-    note.hidden = !slot.previewError;
-    note.textContent = slot.previewError || "";
+    const noteText = slot.previewError || "";
+    note.hidden = !noteText;
+    if (note.textContent !== noteText) note.textContent = noteText;
     const hear = box.querySelector("[data-hear]");
     const video = box.querySelector("[data-monitor]");
     hear.textContent = video.dataset.heard === "1" ? "Senyap" : "Dengar";

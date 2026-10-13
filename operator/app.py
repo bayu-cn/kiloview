@@ -191,7 +191,8 @@ def preview_args(slot_id: str) -> list[str] | None:
         "2-2": "pan=stereo|c0=c1|c1=c1",
     }
     args = [
-        binary, "-nostdin", "-hide_banner", "-loglevel", "warning",
+        "nice", "-n", "12",
+        binary, "-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", "2",
         "-rtsp_transport", "tcp",
         "-i", f"{base}/{slot['source']}",
         "-map", "0:v:0",
@@ -229,7 +230,7 @@ def pipeline_args(slot_id: str) -> list[str]:
     # Gambar dan suara dipisah di rtspsrc. Satu decodebin untuk keduanya
     # membuat cabang audio gagal nyambung dan waktu pipeline tetap 0.
     return [
-        cfg("GST_LAUNCH", "gst-launch-1.0"), "-v", "-e",
+        cfg("GST_LAUNCH", "gst-launch-1.0"), "-e",
         "rtspsrc", f"location={location}", "latency=200", "protocols=tcp", "name=src",
         "src.", "!", "application/x-rtp,media=video", "!", "decodebin", "!", "queue", "!", "video/x-raw", "!",
         *video_args(mode), "!",
@@ -271,6 +272,15 @@ def read_log(slot_id: str, suffix: str = "", limit: int = 40) -> str:
     text = path.read_text(encoding="utf-8", errors="replace")
     lines = [line for line in text.splitlines() if line.strip()]
     return "\n".join(lines[-limit:])
+
+
+def useful_log(slot_id: str, suffix: str = "") -> str:
+    text = read_log(slot_id, suffix, limit=80)
+    keys = ("ERROR", "Error", "Failed", "failed", "no element", "Gagal", "Schedule", "errno")
+    picked = [line for line in text.splitlines() if any(key in line for key in keys)]
+    if picked:
+        return "\n".join(picked[-4:])
+    return "\n".join(text.splitlines()[-6:])
 
 
 def start_pipeline(slot_id: str) -> None:
@@ -344,7 +354,7 @@ def watch_pipeline(slot_id: str, generation: int, proc: subprocess.Popen) -> Non
             threading.Thread(target=restart_later, args=(slot_id, generation), daemon=True).start()
             return
         run["status"] = "error"
-        run["error"] = read_log(slot_id) or f"GStreamer berhenti (kode {proc.returncode})"
+        run["error"] = useful_log(slot_id) or f"GStreamer berhenti (kode {proc.returncode})"
 
 
 def restart_later(slot_id: str, generation: int) -> None:
@@ -462,14 +472,17 @@ def path_ready() -> dict[str, bool]:
 def snapshot() -> dict:
     with lock:
         slots_copy = {slot_id: dict(slot) for slot_id, slot in state.items()}
-        runs_copy = {
-            slot_id: {
+        runs_copy = {}
+        for slot_id, run in runtime.items():
+            proc = run.get("proc")
+            if proc is not None and proc.poll() is None and run["status"] == "error":
+                run["status"] = "playing"
+                run["error"] = None
+            runs_copy[slot_id] = {
                 "status": run["status"],
                 "error": run["error"],
                 "preview_error": run.get("preview_error"),
             }
-            for slot_id, run in runtime.items()
-        }
     ready = path_ready()
     web = webrtc_base()
     routed: dict[str, list[str]] = {}
