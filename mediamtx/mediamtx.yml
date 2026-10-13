@@ -23,3 +23,11 @@ paths:
   p3-4:
     source: srt://127.0.0.1:3004?mode=listener
     sourceOnDemand: false
+
+  # Preview operator. Diisi GStreamer, bukan SRT. Gambar kecil + Opus
+  # supaya browser bisa melihat dan mendengar keluaran SDI.
+  sdi1:
+    source: publisher
+
+  sdi2:
+    source: publisher

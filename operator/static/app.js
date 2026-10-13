@@ -15,6 +15,153 @@ const userEl = document.querySelector("#user");
 const logoutEl = document.querySelector("#logout");
 
 let state = null;
+const players = new Map();
+
+function savedVolume(id) {
+  const saved = sessionStorage.getItem(`listen-${id}`);
+  const level = saved == null ? 0.8 : Number(saved);
+  return Number.isFinite(level) ? level : 0.8;
+}
+
+function waitIce(pc) {
+  if (pc.iceGatheringState === "complete") return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      if (pc.iceGatheringState !== "complete") return;
+      pc.removeEventListener("icegatheringstatechange", done);
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      pc.removeEventListener("icegatheringstatechange", done);
+      resolve();
+    }, 1200);
+    pc.addEventListener("icegatheringstatechange", done);
+  });
+}
+
+function closePlayer(video) {
+  const prev = players.get(video);
+  if (!prev) return;
+  prev.closed = true;
+  if (prev.pc) prev.pc.close();
+  players.delete(video);
+  video.srcObject = null;
+}
+
+async function connectWhep(video, url, options) {
+  const prev = players.get(video);
+  if (prev) {
+    prev.closed = true;
+    if (prev.pc) prev.pc.close();
+  }
+  const pc = new RTCPeerConnection();
+  const record = {
+    url,
+    pc,
+    key: options.key,
+    audio: options.audio,
+    heard: !!options.heard,
+    closed: false,
+    movedAt: Date.now(),
+    lastTime: 0,
+    failedAt: 0,
+  };
+  players.set(video, record);
+  pc.addTransceiver("video", { direction: "recvonly" });
+  if (options.audio) pc.addTransceiver("audio", { direction: "recvonly" });
+  const stream = new MediaStream();
+  video.srcObject = stream;
+  video.muted = !record.heard;
+  video.volume = options.volume ?? 0;
+  pc.ontrack = (event) => {
+    stream.addTrack(event.track);
+    video.play().catch(() => {});
+  };
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitIce(pc);
+    if (record.closed) return;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/sdp" },
+      body: pc.localDescription.sdp,
+    });
+    if (!response.ok) throw new Error(String(response.status));
+    if (record.closed) return;
+    await pc.setRemoteDescription({ type: "answer", sdp: await response.text() });
+    video.play().catch(() => {});
+  } catch (error) {
+    if (!record.closed) record.failedAt = Date.now();
+  }
+}
+
+function syncMedia() {
+  state.sources.forEach((source) => {
+    const video = sourcesEl.querySelector(`[data-preview="${source.id}"]`);
+    if (!video || !source.whep) return;
+    const current = players.get(video);
+    if (current && !current.closed && current.key === source.whep) return;
+    connectWhep(video, source.whep, { audio: false, key: source.whep, heard: false, volume: 0 });
+  });
+
+  Object.entries(state.slots).forEach(([id, slot]) => {
+    const video = slotsEl.querySelector(`[data-monitor="${id}"]`);
+    if (!video) return;
+    if (!slot.source || !slot.whep) {
+      closePlayer(video);
+      return;
+    }
+    const key = `${slot.source}|${slot.audio}`;
+    const current = players.get(video);
+    if (current && !current.closed && current.key === key) return;
+    connectWhep(video, slot.whep, {
+      audio: true,
+      key,
+      heard: video.dataset.heard === "1",
+      volume: Number(video.dataset.volume || savedVolume(id)),
+    });
+  });
+}
+
+function checkStalls() {
+  document.querySelectorAll("video").forEach((video) => {
+    const record = players.get(video);
+    if (!record || record.closed) return;
+    const now = Date.now();
+    const stateName = record.pc.connectionState;
+    const failed = stateName === "failed" || stateName === "disconnected";
+    const httpFailed = record.failedAt && now - record.failedAt > 2000;
+    if (failed || httpFailed) {
+      connectWhep(video, record.url, {
+        audio: record.audio,
+        key: record.key,
+        heard: record.heard,
+        volume: video.volume,
+      });
+      return;
+    }
+    if (video.paused) {
+      video.play().catch(() => {});
+      return;
+    }
+    const time = video.currentTime || 0;
+    if (time > record.lastTime + 0.05) {
+      record.lastTime = time;
+      record.movedAt = now;
+      return;
+    }
+    if (now - record.movedAt > 5000) {
+      connectWhep(video, record.url, {
+        audio: record.audio,
+        key: record.key,
+        heard: record.heard,
+        volume: video.volume,
+      });
+    }
+  });
+}
 
 function esc(value) {
   return String(value).replace(/[&<>"']/g, (ch) => ({
@@ -58,7 +205,7 @@ function shell() {
   sourcesEl.innerHTML = state.sources.map((source) => `
     <article class="card" data-source="${esc(source.id)}">
       <div class="preview">
-        <iframe src="${esc(source.preview)}" title="${esc(source.label)}" allow="autoplay"></iframe>
+        <video data-preview="${esc(source.id)}" playsinline autoplay muted></video>
       </div>
       <div class="card-foot" draggable="true">
         <span class="name">${esc(source.label)}</span>
@@ -72,6 +219,15 @@ function shell() {
       <div class="slot-top">
         <h3>${slot.label}</h3>
         <span class="meta">DeckLink ${slot.device}</span>
+      </div>
+      <div class="preview">
+        <video data-monitor="${id}" playsinline autoplay muted></video>
+      </div>
+      <div class="listen">
+        <button type="button" data-hear="${id}">Dengar</button>
+        <label>Volume monitor
+          <input type="range" min="0" max="100" value="${Math.round(savedVolume(id) * 100)}" data-volume="${id}">
+        </label>
       </div>
       <div class="drop" data-drop="${id}">
         <strong data-assigned="${id}"></strong>
@@ -91,6 +247,7 @@ function shell() {
         </label>
         <button type="button" data-clear="${id}">Lepas</button>
       </div>
+      <p class="note" data-preview-note="${id}" hidden></p>
       <pre class="log" data-log="${id}" hidden></pre>
     </article>
   `).join("");
@@ -107,6 +264,9 @@ function shell() {
 
   slotsEl.querySelectorAll(".slot").forEach((slot) => {
     const id = slot.dataset.slot;
+    const video = slot.querySelector("[data-monitor]");
+    video.dataset.volume = String(savedVolume(id));
+    video.volume = savedVolume(id);
     slot.addEventListener("dragover", (event) => {
       event.preventDefault();
       slot.classList.add("over");
@@ -128,6 +288,21 @@ function shell() {
     });
     slot.querySelector("[data-clear]").addEventListener("click", () => {
       save(id, { source: null });
+    });
+    slot.querySelector("[data-hear]").addEventListener("click", (event) => {
+      const hearing = video.dataset.heard === "1";
+      video.dataset.heard = hearing ? "0" : "1";
+      video.muted = hearing;
+      const record = players.get(video);
+      if (record) record.heard = !hearing;
+      if (!hearing) video.play().catch(() => {});
+      event.currentTarget.textContent = hearing ? "Dengar" : "Senyap";
+    });
+    slot.querySelector("[data-volume]").addEventListener("input", (event) => {
+      const level = Number(event.target.value) / 100;
+      video.volume = level;
+      video.dataset.volume = String(level);
+      sessionStorage.setItem(`listen-${id}`, String(level));
     });
   });
 }
@@ -171,7 +346,15 @@ function paint() {
     const log = box.querySelector("[data-log]");
     log.hidden = slot.status !== "error" || !slot.error;
     log.textContent = slot.error || "";
+    const note = box.querySelector("[data-preview-note]");
+    note.hidden = !slot.previewError;
+    note.textContent = slot.previewError || "";
+    const hear = box.querySelector("[data-hear]");
+    const video = box.querySelector("[data-monitor]");
+    hear.textContent = video.dataset.heard === "1" ? "Senyap" : "Dengar";
+    hear.disabled = !slot.source;
   });
+  syncMedia();
 }
 
 async function save(id, patch) {
@@ -202,6 +385,7 @@ async function tick() {
       state = next;
     }
     paint();
+    checkStalls();
   } catch (error) {
     console.error(error);
   }

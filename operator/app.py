@@ -108,6 +108,10 @@ def load_state() -> dict:
         slots[slot_id] = {"source": source, "mode": mode, "audio": audio}
         runtime.setdefault(slot_id, {
             "proc": None,
+            "preview": None,
+            "preview_generation": 0,
+            "preview_restarts": 0,
+            "preview_error": None,
             "generation": 0,
             "restarts": 0,
             "status": "empty" if source is None else "starting",
@@ -174,6 +178,107 @@ def audio_args(mapping: str) -> list[str]:
     ]
 
 
+_gst_cache: dict[tuple[str, str], bool] = {}
+
+
+def inspect_env(binary: str) -> dict[str, str] | None:
+    if binary != "gst-launch-1.0":
+        return None
+    env = os.environ.copy()
+    for key in ("GST_PLUGIN_PATH", "GST_PLUGIN_SYSTEM_PATH", "LD_LIBRARY_PATH"):
+        env.pop(key, None)
+    return env
+
+
+def gst_has(binary: str, element: str) -> bool:
+    key = (binary, element)
+    if key in _gst_cache:
+        return _gst_cache[key]
+    inspect = str(Path(binary).with_name("gst-inspect-1.0"))
+    try:
+        result = subprocess.run(
+            [inspect, element],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=8,
+            env=inspect_env(binary),
+        )
+    except (OSError, subprocess.SubprocessError):
+        _gst_cache[key] = False
+        return False
+    _gst_cache[key] = result.returncode == 0
+    return _gst_cache[key]
+
+
+def preview_launch() -> str | None:
+    host = cfg("GST_LAUNCH", "gst-launch-1.0")
+    candidates = [host] if host != "gst-launch-1.0" else []
+    candidates.append("gst-launch-1.0")
+    for binary in candidates:
+        if gst_has(binary, "x264enc") and gst_has(binary, "opusenc") and gst_has(binary, "rtspclientsink"):
+            return binary
+        if gst_has(binary, "openh264enc") and gst_has(binary, "opusenc") and gst_has(binary, "rtspclientsink"):
+            return binary
+    return None
+
+
+def video_encoder(binary: str) -> list[str] | None:
+    if gst_has(binary, "x264enc"):
+        return [
+            "x264enc", "tune=zerolatency", "speed-preset=ultrafast",
+            "bitrate=700", "key-int-max=25", "bframes=0",
+            "option-string=profile=baseline", "!",
+            "h264parse", "config-interval=-1",
+        ]
+    if gst_has(binary, "openh264enc"):
+        return [
+            "openh264enc", "bitrate=700000", "complexity=low", "!",
+            "h264parse", "config-interval=-1",
+        ]
+    return None
+
+
+def preview_audio_args(mapping: str) -> list[str]:
+    tail = ["audio/x-raw,rate=48000,channels=2", "!", "opusenc", "bitrate=64000"]
+    if mapping == "1-2":
+        return ["audioconvert", "!", "audioresample", "!", *tail]
+    prop = matrix_property()
+    return [
+        "audioconvert", "!", "audio/x-raw,channels=2", "!",
+        "audiomixmatrix", "mode=manual", "in-channels=2", "out-channels=2",
+        f'{prop}="{MATRICES[mapping]}"', "!",
+        "audioconvert", "!", "audioresample", "!",
+        *tail,
+    ]
+
+
+def preview_args(slot_id: str) -> list[str] | None:
+    binary = preview_launch()
+    if binary is None:
+        return None
+    encoder = video_encoder(binary)
+    if encoder is None:
+        return None
+    slot = state[slot_id]
+    location = f"{cfg('RTSP_BASE', 'rtsp://127.0.0.1:8554').rstrip('/')}/{slot['source']}"
+    publish = f"{cfg('RTSP_BASE', 'rtsp://127.0.0.1:8554').rstrip('/')}/{slot_id}"
+    return [
+        binary, "-e",
+        "rtspsrc", f"location={location}", "latency=200", "protocols=tcp", "name=src",
+        "rtspclientsink", "name=pub", f"location={publish}", "protocols=tcp",
+        "src.", "!", "application/x-rtp,media=video", "!", "decodebin", "!",
+        "queue", "max-size-buffers=2", "leaky=downstream", "!",
+        "videoconvert", "!", "videoscale", "!", "videorate", "!",
+        "video/x-raw,width=640,height=360,framerate=25/1", "!",
+        *encoder, "!",
+        "rtph264pay", "config-interval=-1", "pt=96", "!", "queue", "!", "pub.",
+        "src.", "!", "application/x-rtp,media=audio", "!", "decodebin", "!",
+        "queue", "max-size-buffers=2", "leaky=downstream", "!",
+        *preview_audio_args(slot["audio"]), "!",
+        "rtpopuspay", "pt=97", "!", "queue", "!", "pub.",
+    ]
+
+
 def pipeline_args(slot_id: str) -> list[str]:
     slot = state[slot_id]
     device = SLOTS[slot_id]["device"]
@@ -183,7 +288,7 @@ def pipeline_args(slot_id: str) -> list[str]:
     # Gambar dan suara dipisah di rtspsrc. Satu decodebin untuk keduanya
     # membuat cabang audio gagal nyambung dan waktu pipeline tetap 0.
     return [
-        "gst-launch-1.0", "-v", "-e",
+        cfg("GST_LAUNCH", "gst-launch-1.0"), "-v", "-e",
         "rtspsrc", f"location={location}", "latency=200", "protocols=tcp", "name=src",
         "src.", "!", "application/x-rtp,media=video", "!", "decodebin", "!", "queue", "!", "video/x-raw", "!",
         *video_args(mode), "!",
@@ -218,13 +323,13 @@ def kill_process(proc: subprocess.Popen) -> None:
         proc.wait(timeout=2)
 
 
-def read_log(slot_id: str) -> str:
-    path = LOG_DIR / f"{slot_id}.log"
+def read_log(slot_id: str, suffix: str = "", limit: int = 40) -> str:
+    path = LOG_DIR / f"{slot_id}{suffix}.log"
     if not path.exists():
         return ""
     text = path.read_text(encoding="utf-8", errors="replace")
     lines = [line for line in text.splitlines() if line.strip()]
-    return "\n".join(lines[-40:])
+    return "\n".join(lines[-limit:])
 
 
 def start_pipeline(slot_id: str) -> None:
@@ -237,9 +342,12 @@ def start_pipeline(slot_id: str) -> None:
     generation = run["generation"]
     slot = state[slot_id]
     if not slot["source"]:
+        stop_preview(run)
         run["status"] = "empty"
         run["error"] = None
         run["restarts"] = 0
+        run["preview_error"] = None
+        run["preview_restarts"] = 0
         return
 
     LOG_DIR.mkdir(exist_ok=True)
@@ -260,6 +368,7 @@ def start_pipeline(slot_id: str) -> None:
         log.close()
         run["status"] = "error"
         run["error"] = str(exc)
+        start_preview(slot_id)
         return
     log.close()
     run["proc"] = proc
@@ -267,6 +376,7 @@ def start_pipeline(slot_id: str) -> None:
     run["error"] = None
     threading.Thread(target=watch_pipeline, args=(slot_id, generation, proc), daemon=True).start()
     threading.Thread(target=mark_playing, args=(slot_id, generation, proc), daemon=True).start()
+    start_preview(slot_id)
 
 
 def mark_playing(slot_id: str, generation: int, proc: subprocess.Popen) -> None:
@@ -305,6 +415,75 @@ def restart_later(slot_id: str, generation: int) -> None:
         start_pipeline(slot_id)
 
 
+def stop_preview(run: dict) -> None:
+    run["preview_generation"] = run.get("preview_generation", 0) + 1
+    proc = run.get("preview")
+    run["preview"] = None
+    if proc is not None and proc.poll() is None:
+        kill_process(proc)
+
+
+def start_preview(slot_id: str) -> None:
+    run = runtime[slot_id]
+    stop_preview(run)
+    if not state[slot_id]["source"]:
+        run["preview_error"] = None
+        return
+    args = preview_args(slot_id)
+    if args is None:
+        run["preview_error"] = (
+            "Preview SDI butuh encoder H.264. Di server jalankan: "
+            "sudo apt install gstreamer1.0-plugins-ugly"
+        )
+        return
+    generation = run["preview_generation"]
+    LOG_DIR.mkdir(exist_ok=True)
+    log_path = LOG_DIR / f"{slot_id}-preview.log"
+    log = open(log_path, "w", encoding="utf-8")
+    log.write(" ".join(args) + "\n\n")
+    log.flush()
+    try:
+        proc = subprocess.Popen(
+            args,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=os.name == "posix",
+            env=inspect_env(args[0]),
+        )
+    except OSError as exc:
+        log.write(f"\nGagal menjalankan preview: {exc}\n")
+        log.close()
+        run["preview_error"] = str(exc)
+        return
+    log.close()
+    run["preview"] = proc
+    run["preview_error"] = None
+    threading.Thread(target=watch_preview, args=(slot_id, generation, proc), daemon=True).start()
+
+
+def watch_preview(slot_id: str, generation: int, proc: subprocess.Popen) -> None:
+    proc.wait()
+    with lock:
+        run = runtime[slot_id]
+        if run.get("preview_generation") != generation or run.get("preview") is not proc:
+            return
+        run["preview"] = None
+        if state[slot_id]["source"] and run.get("preview_restarts", 0) < 3:
+            run["preview_restarts"] = run.get("preview_restarts", 0) + 1
+            threading.Thread(target=restart_preview_later, args=(slot_id, generation), daemon=True).start()
+            return
+        run["preview_error"] = read_log(slot_id, "-preview", 8) or f"Preview berhenti (kode {proc.returncode})"
+
+
+def restart_preview_later(slot_id: str, generation: int) -> None:
+    time.sleep(2)
+    with lock:
+        run = runtime[slot_id]
+        if run.get("preview_generation") != generation or not state[slot_id]["source"]:
+            return
+        start_preview(slot_id)
+
+
 def stop_all() -> None:
     with lock:
         for slot_id in SLOTS:
@@ -312,8 +491,21 @@ def stop_all() -> None:
             run["generation"] += 1
             proc = run["proc"]
             run["proc"] = None
+            preview = run.get("preview")
+            run["preview"] = None
+            run["preview_generation"] = run.get("preview_generation", 0) + 1
             if proc is not None:
                 kill_process(proc)
+            if preview is not None:
+                kill_process(preview)
+
+
+def webrtc_base() -> str:
+    explicit = cfg("MEDIAMTX_WEBRTC")
+    if explicit:
+        return explicit.rstrip("/")
+    public = cfg("MEDIAMTX_PUBLIC", "http://172.17.20.46:8889")
+    return public.replace(":8888", ":8889").rstrip("/")
 
 
 def path_ready() -> dict[str, bool]:
@@ -331,11 +523,15 @@ def snapshot() -> dict:
     with lock:
         slots_copy = {slot_id: dict(slot) for slot_id, slot in state.items()}
         runs_copy = {
-            slot_id: {"status": run["status"], "error": run["error"]}
+            slot_id: {
+                "status": run["status"],
+                "error": run["error"],
+                "preview_error": run.get("preview_error"),
+            }
             for slot_id, run in runtime.items()
         }
     ready = path_ready()
-    preview_base = cfg("MEDIAMTX_PUBLIC", "http://172.17.20.46:8888").rstrip("/")
+    web = webrtc_base()
     routed: dict[str, list[str]] = {}
     slots_out = {}
     for slot_id, meta in SLOTS.items():
@@ -351,6 +547,8 @@ def snapshot() -> dict:
             "audio": slot["audio"],
             "status": run["status"],
             "error": run["error"] if run["status"] == "error" else None,
+            "whep": f"{web}/{slot_id}/whep" if slot["source"] else None,
+            "previewError": run["preview_error"],
         }
     return {
         "auth": auth_enabled(),
@@ -360,7 +558,7 @@ def snapshot() -> dict:
                 "id": source,
                 "label": source,
                 "ready": bool(ready.get(source)),
-                "preview": f"{preview_base}/{urllib.parse.quote(source)}?muted=false",
+                "whep": f"{web}/{urllib.parse.quote(source)}/whep",
                 "routedTo": routed.get(source, []),
             }
             for source in sources()
@@ -466,6 +664,7 @@ def apply_slot(slot_id: str, payload: dict) -> None:
             raise ValueError("Peta audio tidak dikenal.")
         slot["audio"] = payload["audio"]
     runtime[slot_id]["restarts"] = 0
+    runtime[slot_id]["preview_restarts"] = 0
     save_state()
     start_pipeline(slot_id)
 
