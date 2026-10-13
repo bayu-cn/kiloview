@@ -25,8 +25,9 @@ LOG_DIR = ROOT / "logs"
 
 SLOTS = {
     "sdi1": {"label": "SDI 1", "device": 0},
-    # DeckLink Duo 2 half-duplex: soket SDI 2 = device 2. Device 1 adalah SDI 3.
-    "sdi2": {"label": "SDI 2", "device": 2},
+    # DeckLink 4K Extreme hanya punya satu kanal putar (device 0).
+    # Device 1 adalah sisi masukan. Soket SDI lain membawa gambar yang sama.
+    "sdi2": {"label": "SDI 2", "device": 1},
 }
 MODES = ("1080p60", "1080i50")
 AUDIO = ("1-2", "1-1", "2-2")
@@ -283,10 +284,8 @@ def explain_sdi_error(text: str, device: int) -> str:
     if "Failed to start" in text or "doesn't want to preroll" in text:
         return (
             f"DeckLink device {device} tidak bisa mulai. "
-            "Profil kartu masih menggabungkan SDI 1 dan SDI 2. "
-            "Di Blackmagic Desktop Video Setup, ubah connector mapping dari "
-            "\"SDI 1 & SDI 2\" menjadi satu konektor (half duplex). "
-            "Setelah itu SDI 1 = device 0 dan SDI 2 = device 2.\n"
+            "DeckLink 4K Extreme hanya punya satu keluaran. "
+            "Soket SDI yang lain menampilkan gambar yang sama, bukan program kedua.\n"
             + text
         )
     return text
