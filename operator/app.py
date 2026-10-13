@@ -25,7 +25,8 @@ LOG_DIR = ROOT / "logs"
 
 SLOTS = {
     "sdi1": {"label": "SDI 1", "device": 0},
-    "sdi2": {"label": "SDI 2", "device": 1},
+    # DeckLink Duo 2 half-duplex: soket SDI 2 = device 2. Device 1 adalah SDI 3.
+    "sdi2": {"label": "SDI 2", "device": 2},
 }
 MODES = ("1080p60", "1080i50")
 AUDIO = ("1-2", "1-1", "2-2")
@@ -59,6 +60,10 @@ def apply_paths() -> None:
     base.mkdir(parents=True, exist_ok=True)
     STATE_PATH = base / "state.json"
     LOG_DIR = base / "logs"
+    for slot_id, env_name in (("sdi1", "SDI1_DEVICE"), ("sdi2", "SDI2_DEVICE")):
+        raw = cfg(env_name)
+        if raw.isdigit():
+            SLOTS[slot_id]["device"] = int(raw)
 
 
 def cfg(name: str, default: str = "") -> str:
@@ -274,6 +279,19 @@ def read_log(slot_id: str, suffix: str = "", limit: int = 40) -> str:
     return "\n".join(lines[-limit:])
 
 
+def explain_sdi_error(text: str, device: int) -> str:
+    if "Failed to start" in text or "doesn't want to preroll" in text:
+        return (
+            f"DeckLink device {device} tidak bisa mulai. "
+            "Profil kartu masih menggabungkan SDI 1 dan SDI 2. "
+            "Di Blackmagic Desktop Video Setup, ubah connector mapping dari "
+            "\"SDI 1 & SDI 2\" menjadi satu konektor (half duplex). "
+            "Setelah itu SDI 1 = device 0 dan SDI 2 = device 2.\n"
+            + text
+        )
+    return text
+
+
 def useful_log(slot_id: str, suffix: str = "") -> str:
     text = read_log(slot_id, suffix, limit=80)
     keys = ("ERROR", "Error", "Failed", "failed", "no element", "Gagal", "Schedule", "errno")
@@ -354,7 +372,7 @@ def watch_pipeline(slot_id: str, generation: int, proc: subprocess.Popen) -> Non
             threading.Thread(target=restart_later, args=(slot_id, generation), daemon=True).start()
             return
         run["status"] = "error"
-        run["error"] = useful_log(slot_id) or f"GStreamer berhenti (kode {proc.returncode})"
+        run["error"] = explain_sdi_error(useful_log(slot_id), SLOTS[slot_id]["device"]) or f"GStreamer berhenti (kode {proc.returncode})"
 
 
 def restart_later(slot_id: str, generation: int) -> None:
