@@ -204,7 +204,7 @@ function statusText(slot) {
 }
 
 function shell() {
-  sourcesEl.innerHTML = state.sources.map((source) => `
+  sourcesEl.innerHTML = state.sources.map((source) => state.admin ? `
     <article class="card" data-source="${esc(source.id)}">
       <div class="preview">
         <video data-preview="${esc(source.id)}" playsinline autoplay muted></video>
@@ -214,7 +214,16 @@ function shell() {
           <span class="name" data-label="${esc(source.id)}"></span>
           <span class="hint" data-url="${esc(source.id)}"></span>
         </div>
-        ${state.admin ? `<button type="button" data-edit="${esc(source.id)}">Edit</button>` : ""}
+        <button type="button" data-edit="${esc(source.id)}">Edit</button>
+        <span class="badge" data-badge="${source.id}"></span>
+      </div>
+    </article>
+  ` : `
+    <article class="card" data-source="${esc(source.id)}">
+      <div class="preview card-drag" draggable="true">
+        <video data-preview="${esc(source.id)}" playsinline autoplay muted></video>
+      </div>
+      <div class="card-foot">
         <span class="badge" data-badge="${source.id}"></span>
       </div>
     </article>
@@ -336,8 +345,10 @@ function paint() {
     const badgeEl = card.querySelector("[data-badge]");
     badgeEl.className = `badge ${kind}`;
     badgeEl.textContent = text;
-    card.querySelector("[data-label]").textContent = source.label;
-    card.querySelector("[data-url]").textContent = source.url;
+    const label = card.querySelector("[data-label]");
+    if (label) label.textContent = source.label;
+    const url = card.querySelector("[data-url]");
+    if (url) url.textContent = source.url;
   });
 
   Object.entries(state.slots).forEach(([id, slot]) => {
@@ -345,7 +356,8 @@ function paint() {
     box.classList.toggle("playing", slot.status === "playing");
     const assigned = box.querySelector("[data-assigned]");
     const hint = box.querySelector("[data-hint]");
-    assigned.textContent = slot.source || "Empty";
+    const named = state.sources.find((source) => source.id === slot.source);
+    assigned.textContent = slot.source ? (state.admin ? slot.source : (named ? named.label : "Live")) : "Empty";
     hint.textContent = slot.source ? "Drop another source to replace" : "Drop a source here";
     const status = box.querySelector("[data-status]");
     status.className = `status ${slot.status}`;
@@ -391,7 +403,7 @@ async function save(id, patch) {
 
 function accountLabel(next) {
   if (!next.user) return "LAN, no login";
-  return `${next.user} · ${next.admin ? "IT" : "feeddesk"}`;
+  return `${next.user} · ${next.group || (next.admin ? "IT" : "operator")}`;
 }
 
 function applyRole() {
@@ -399,7 +411,7 @@ function applyRole() {
   const note = document.querySelector("#inputs-note");
   note.textContent = state.admin
     ? "Drag a name onto an SDI slot. Display name and source URL can be edited here."
-    : "Drag a name onto an SDI slot.";
+    : "Drag a preview onto an SDI slot.";
   if (!state.admin) closeEditor();
 }
 

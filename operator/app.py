@@ -1243,9 +1243,22 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def first_name(*env_names: str, default: str) -> str:
+    for name in env_names:
+        raw = os.environ.get(name, "")
+        part = raw.split(",")[0].strip()
+        if part:
+            return part
+    return default
+
+
 def with_session(body: dict, session: dict) -> dict:
     body["user"] = session.get("user")
     body["admin"] = bool(session.get("admin"))
+    if session.get("admin"):
+        body["group"] = first_name("ADMIN_GROUP", "ADMIN_GROUPS", default="IT")
+    else:
+        body["group"] = first_name("OPERATOR_GROUP", "OPERATOR_GROUPS", "ALLOWED_GROUP", "ALLOWED_GROUPS", default="feeddesk")
     return body
 
 

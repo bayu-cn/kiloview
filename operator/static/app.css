@@ -129,6 +129,8 @@ main {
   gap: 8px;
 }
 .card-drag { display: grid; gap: 2px; cursor: grab; min-width: 0; flex: 1; }
+.preview.card-drag { cursor: grab; }
+.preview.card-drag video { pointer-events: none; }
 .card-drag:active { cursor: grabbing; }
 .card-drag .hint {
   font-size: 12px;
