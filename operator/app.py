@@ -104,9 +104,37 @@ def auth_enabled() -> bool:
     ))
 
 
+def names_from(*env_names: str, default: str = "") -> set[str]:
+    found = set()
+    seen = False
+    for name in env_names:
+        if name not in os.environ:
+            continue
+        seen = True
+        found.update(part.strip().lower() for part in os.environ.get(name, "").split(",") if part.strip())
+    if not seen:
+        found.update(part.strip().lower() for part in default.split(",") if part.strip())
+    return found
+
+
 def allowed_roles() -> set[str]:
-    raw = cfg("ALLOWED_ROLES", "admin,operator-feeddesk")
-    return {part.strip() for part in raw.split(",") if part.strip()}
+    return names_from("ALLOWED_ROLES", default="admin,operator-feeddesk")
+
+
+def admin_roles() -> set[str]:
+    return names_from("ADMIN_ROLES", default="admin")
+
+
+def operator_roles() -> set[str]:
+    return names_from("OPERATOR_ROLES", default="operator-feeddesk")
+
+
+def admin_groups() -> set[str]:
+    return names_from("ADMIN_GROUP", "ADMIN_GROUPS", default="IT")
+
+
+def operator_groups() -> set[str]:
+    return names_from("OPERATOR_GROUP", "OPERATOR_GROUPS", "ALLOWED_GROUP", "ALLOWED_GROUPS", default="feeddesk")
 
 
 def sources() -> list[str]:
@@ -786,12 +814,37 @@ def jwt_payload(token: str) -> dict:
     return json.loads(base64.urlsafe_b64decode(part))
 
 
-def token_roles(token: str) -> set[str]:
-    payload = jwt_payload(token)
+def token_roles(payload: dict) -> set[str]:
     roles = set(payload.get("realm_access", {}).get("roles", []))
     client = cfg("KEYCLOAK_CLIENT_ID")
     roles.update(payload.get("resource_access", {}).get(client, {}).get("roles", []))
-    return roles
+    return {role.lower() for role in roles if isinstance(role, str)}
+
+
+def token_groups(payload: dict) -> set[str]:
+    raw = payload.get("groups")
+    if raw is None:
+        raw = payload.get("group")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return set()
+    names = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        leaf = item.strip().strip("/").split("/")[-1].lower()
+        if leaf:
+            names.add(leaf)
+    return names
+
+
+def membership(payload: dict) -> tuple[bool, bool]:
+    roles = token_roles(payload)
+    groups = token_groups(payload)
+    is_admin = bool(roles & admin_roles() or groups & admin_groups())
+    is_operator = bool(roles & operator_roles() or groups & operator_groups() or roles & (allowed_roles() - admin_roles()))
+    return is_admin, is_admin or is_operator
 
 
 def exchange_token(form: dict) -> dict:
@@ -809,12 +862,13 @@ def exchange_token(form: dict) -> dict:
 def session_from_token(token: dict) -> dict:
     access = token["access_token"]
     payload = jwt_payload(access)
-    roles = token_roles(access)
-    if roles.isdisjoint(allowed_roles()):
-        raise PermissionError("This account does not have the admin or operator-feeddesk role.")
+    is_admin, allowed = membership(payload)
+    if not allowed:
+        names = ", ".join(sorted(admin_groups() | operator_groups()))
+        raise PermissionError(f"This account is not in an allowed group ({names}).")
     return {
         "user": payload.get("preferred_username") or payload.get("name") or "operator",
-        "roles": sorted(roles & allowed_roles()),
+        "admin": is_admin,
         "access": access,
         "refresh": token.get("refresh_token"),
         "id_token": token.get("id_token"),
@@ -844,7 +898,7 @@ def refresh_session(session: dict) -> bool:
 
 def current_session(handler: BaseHTTPRequestHandler) -> dict | None:
     if not auth_enabled():
-        return {"user": None, "roles": [], "local": True}
+        return {"user": None, "roles": [], "local": True, "admin": True}
     cookie = handler.headers.get("Cookie", "")
     sid = ""
     for part in cookie.split(";"):
@@ -1022,9 +1076,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self.send_json(400, {"error": str(exc)})
             return
-        body = snapshot()
-        body["user"] = session.get("user")
-        self.send_json(200, body)
+        self.send_json(200, with_session(snapshot(), session))
 
     def read_json(self) -> dict:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -1042,6 +1094,9 @@ class Handler(BaseHTTPRequestHandler):
         session = current_session(self)
         if session is None:
             self.send_json(401, {"error": "Login required."})
+            return
+        if not session.get("admin"):
+            self.send_json(403, {"error": "Only the IT group can edit inputs."})
             return
         try:
             if path.endswith("/delete"):
@@ -1061,8 +1116,7 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             self.send_json(500, {"error": f"Could not save the MediaMTX config: {exc}"})
             return
-        body = snapshot()
-        body["user"] = session.get("user")
+        body = with_session(snapshot(), session)
         if warning:
             body["warning"] = warning
         self.send_json(200, body)
@@ -1072,9 +1126,7 @@ class Handler(BaseHTTPRequestHandler):
         if session is None:
             self.send_json(401, {"error": "Login required."})
             return
-        body = snapshot()
-        body["user"] = session.get("user")
-        self.send_json(200, body)
+        self.send_json(200, with_session(snapshot(), session))
 
     def handle_login(self) -> None:
         if not auth_enabled():
@@ -1152,6 +1204,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+
+def with_session(body: dict, session: dict) -> dict:
+    body["user"] = session.get("user")
+    body["admin"] = bool(session.get("admin"))
+    return body
 
 
 def message_page(title: str, message: str) -> str:

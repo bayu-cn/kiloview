@@ -214,7 +214,7 @@ function shell() {
           <span class="name" data-label="${esc(source.id)}"></span>
           <span class="hint" data-url="${esc(source.id)}"></span>
         </div>
-        <button type="button" data-edit="${esc(source.id)}">Edit</button>
+        ${state.admin ? `<button type="button" data-edit="${esc(source.id)}">Edit</button>` : ""}
         <span class="badge" data-badge="${source.id}"></span>
       </div>
     </article>
@@ -266,10 +266,13 @@ function shell() {
       card.classList.add("dragging");
     });
     handle.addEventListener("dragend", () => card.classList.remove("dragging"));
-    card.querySelector("[data-edit]").addEventListener("click", () => {
-      const source = state.sources.find((item) => item.id === card.dataset.source);
-      if (source) openEditor(source);
-    });
+    const edit = card.querySelector("[data-edit]");
+    if (edit) {
+      edit.addEventListener("click", () => {
+        const source = state.sources.find((item) => item.id === card.dataset.source);
+        if (source) openEditor(source);
+      });
+    }
   });
 
   slotsEl.querySelectorAll(".slot").forEach((slot) => {
@@ -386,6 +389,20 @@ async function save(id, patch) {
   }
 }
 
+function accountLabel(next) {
+  if (!next.user) return "LAN, no login";
+  return `${next.user} · ${next.admin ? "IT" : "feeddesk"}`;
+}
+
+function applyRole() {
+  addSourceButton.hidden = !state.admin;
+  const note = document.querySelector("#inputs-note");
+  note.textContent = state.admin
+    ? "Drag a name onto an SDI slot. Display name and source URL can be edited here."
+    : "Drag a name onto an SDI slot.";
+  if (!state.admin) closeEditor();
+}
+
 async function tick() {
   try {
     const next = await api("/api/state");
@@ -393,11 +410,13 @@ async function tick() {
     const sourceKey = next.sources.map((source) => source.id).join(",");
     if (!state) {
       state = next;
-      userEl.textContent = next.user ? `${next.user}` : "LAN, no login";
+      userEl.textContent = accountLabel(next);
       logoutEl.hidden = !next.auth;
+      applyRole();
       shell();
-    } else if (state.sources.map((source) => source.id).join(",") !== sourceKey) {
+    } else if (state.sources.map((source) => source.id).join(",") !== sourceKey || state.admin !== next.admin) {
       state = next;
+      applyRole();
       shell();
     } else {
       state = next;
