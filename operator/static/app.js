@@ -407,6 +407,7 @@ function accountLabel(next) {
 }
 
 function applyRole() {
+  document.body.classList.toggle("is-operator", !state.admin);
   addSourceButton.hidden = !state.admin;
   const note = document.querySelector("#inputs-note");
   note.textContent = state.admin

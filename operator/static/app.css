@@ -161,6 +161,14 @@ main {
   border-radius: 8px;
   flex: none;
 }
+.editor[hidden],
+body.is-operator .editor,
+body.is-operator #add-source,
+body.is-operator .card-drag .name,
+body.is-operator .card-drag .hint,
+body.is-operator [data-edit] {
+  display: none !important;
+}
 .editor-actions { display: flex; gap: 8px; }
 
 .name { font-size: 14px; }

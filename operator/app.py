@@ -851,8 +851,15 @@ def membership(payloads: list[dict]) -> tuple[bool, bool, set[str]]:
     for payload in payloads:
         roles |= token_roles(payload)
         groups |= token_groups(payload)
-    is_admin = bool(roles & admin_roles() or groups & admin_groups())
-    is_operator = bool(roles & operator_roles() or groups & operator_groups() or roles & (allowed_roles() - admin_roles()))
+    in_admin_group = bool(groups & admin_groups())
+    in_operator_group = bool(groups & operator_groups())
+    if in_admin_group:
+        is_admin = True
+    elif in_operator_group:
+        is_admin = False
+    else:
+        is_admin = bool(roles & admin_roles())
+    is_operator = in_operator_group or bool(roles & operator_roles() or roles & (allowed_roles() - admin_roles()))
     return is_admin, is_admin or is_operator, groups
 
 
