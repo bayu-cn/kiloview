@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import signal
+import ssl
 import subprocess
 import sys
 import threading
@@ -847,6 +848,16 @@ def membership(payload: dict) -> tuple[bool, bool]:
     return is_admin, is_admin or is_operator
 
 
+def keycloak_ssl_context() -> ssl.SSLContext | None:
+    verify = cfg("KEYCLOAK_SSL_VERIFY", "true").lower()
+    if verify in {"0", "false", "no"}:
+        return ssl._create_unverified_context()
+    cafile = cfg("KEYCLOAK_CA")
+    if cafile:
+        return ssl.create_default_context(cafile=cafile)
+    return None
+
+
 def exchange_token(form: dict) -> dict:
     data = urllib.parse.urlencode(form).encode()
     request = urllib.request.Request(
@@ -855,7 +866,7 @@ def exchange_token(form: dict) -> dict:
         method="POST",
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
-    with urllib.request.urlopen(request, timeout=10) as response:
+    with urllib.request.urlopen(request, timeout=10, context=keycloak_ssl_context()) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
