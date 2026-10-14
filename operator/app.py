@@ -822,10 +822,7 @@ def token_roles(payload: dict) -> set[str]:
     return {role.lower() for role in roles if isinstance(role, str)}
 
 
-def token_groups(payload: dict) -> set[str]:
-    raw = payload.get("groups")
-    if raw is None:
-        raw = payload.get("group")
+def group_names(raw: object) -> set[str]:
     if isinstance(raw, str):
         raw = [raw]
     if not isinstance(raw, list):
@@ -840,12 +837,23 @@ def token_groups(payload: dict) -> set[str]:
     return names
 
 
-def membership(payload: dict) -> tuple[bool, bool]:
-    roles = token_roles(payload)
-    groups = token_groups(payload)
+def token_groups(payload: dict) -> set[str]:
+    names = set()
+    for key, value in payload.items():
+        if "group" in str(key).lower():
+            names |= group_names(value)
+    return names
+
+
+def membership(payloads: list[dict]) -> tuple[bool, bool, set[str]]:
+    roles: set[str] = set()
+    groups: set[str] = set()
+    for payload in payloads:
+        roles |= token_roles(payload)
+        groups |= token_groups(payload)
     is_admin = bool(roles & admin_roles() or groups & admin_groups())
     is_operator = bool(roles & operator_roles() or groups & operator_groups() or roles & (allowed_roles() - admin_roles()))
-    return is_admin, is_admin or is_operator
+    return is_admin, is_admin or is_operator, groups
 
 
 def keycloak_ssl_context() -> ssl.SSLContext:
@@ -872,13 +880,25 @@ def exchange_token(form: dict) -> dict:
         return json.loads(response.read().decode("utf-8"))
 
 
+def token_payloads(token: dict) -> list[dict]:
+    payloads = [jwt_payload(token["access_token"])]
+    raw = token.get("id_token")
+    if raw:
+        try:
+            payloads.append(jwt_payload(raw))
+        except (IndexError, json.JSONDecodeError, ValueError, TypeError):
+            pass
+    return payloads
+
+
 def session_from_token(token: dict) -> dict:
-    access = token["access_token"]
-    payload = jwt_payload(access)
-    is_admin, allowed = membership(payload)
+    payloads = token_payloads(token)
+    payload = payloads[0]
+    is_admin, allowed, groups = membership(payloads)
     if not allowed:
         names = ", ".join(sorted(admin_groups() | operator_groups()))
-        raise PermissionError(f"This account is not in an allowed group ({names}).")
+        seen = ", ".join(sorted(groups)) or "none"
+        raise PermissionError(f"This account is not in an allowed group ({names}). Token groups: {seen}.")
     return {
         "user": payload.get("preferred_username") or payload.get("name") or "operator",
         "admin": is_admin,
