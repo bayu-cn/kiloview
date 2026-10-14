@@ -15,10 +15,12 @@ services:
       GST_PLUGIN_PATH: /host-usr/lib/x86_64-linux-gnu/gstreamer-1.0
       GST_PLUGIN_SYSTEM_PATH: /host-usr/lib/x86_64-linux-gnu/gstreamer-1.0
       MEDIAMTX_CONFIG: /etc/mediamtx/mediamtx.yml
+      SSL_CERT_FILE: /etc/ssl/certs/ca-certificates.crt
     volumes:
       - ./config.env:/app/config.env:ro
       - ./data:/data
       - ../mediamtx/mediamtx.yml:/etc/mediamtx/mediamtx.yml
+      - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
       - /dev:/dev
       - /usr:/host-usr:ro
       - /lib:/host-lib:ro

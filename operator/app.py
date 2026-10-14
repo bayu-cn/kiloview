@@ -848,14 +848,16 @@ def membership(payload: dict) -> tuple[bool, bool]:
     return is_admin, is_admin or is_operator
 
 
-def keycloak_ssl_context() -> ssl.SSLContext | None:
+def keycloak_ssl_context() -> ssl.SSLContext:
     verify = cfg("KEYCLOAK_SSL_VERIFY", "true").lower()
     if verify in {"0", "false", "no"}:
         return ssl._create_unverified_context()
-    cafile = cfg("KEYCLOAK_CA")
-    if cafile:
-        return ssl.create_default_context(cafile=cafile)
-    return None
+    cafile = cfg("KEYCLOAK_CA") or os.environ.get("SSL_CERT_FILE") or None
+    ctx = ssl.create_default_context(cafile=cafile) if cafile else ssl.create_default_context()
+    strict = getattr(ssl, "VERIFY_X509_STRICT", None)
+    if strict:
+        ctx.verify_flags &= ~strict
+    return ctx
 
 
 def exchange_token(form: dict) -> dict:
