@@ -117,22 +117,61 @@ def sources_path() -> Path:
     return STATE_PATH.parent / "sources.json"
 
 
-def normalize_source(item: dict) -> dict | None:
-    source_id = str(item.get("id", "")).strip()
-    label = str(item.get("label") or source_id).strip()
+SOURCE_SCHEMES = {"srt", "rtsp", "rtsps", "rtmp", "rtmps", "udp", "http", "https"}
+LOCAL_HOSTS = {"", "0.0.0.0", "127.0.0.1", "localhost", "::1"}
+BLOCKED_PORTS = {80, 8090, 8554, 8888, 8889, 9997, 1935}
+
+
+def legacy_listener_url(port: int) -> str:
+    return f"srt://127.0.0.1:{port}?mode=listener"
+
+
+def source_url(item: dict) -> str | None:
+    raw = str(item.get("url") or "").strip()
+    if raw:
+        return raw
     try:
         port = int(item.get("port"))
     except (TypeError, ValueError):
         return None
+    if 1024 <= port <= 65535:
+        return legacy_listener_url(port)
+    return None
+
+
+def valid_source_url(url: str) -> bool:
+    if not url or len(url) > 300 or any(char.isspace() or ord(char) < 32 for char in url):
+        return False
+    parsed = urllib.parse.urlparse(url)
+    return parsed.scheme in SOURCE_SCHEMES and bool(parsed.netloc)
+
+
+def local_port(url: str) -> int | None:
+    parsed = urllib.parse.urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if host in LOCAL_HOSTS and parsed.port:
+        return parsed.port
+    return None
+
+
+def yaml_quote(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def normalize_source(item: dict) -> dict | None:
+    source_id = str(item.get("id", "")).strip()
+    label = str(item.get("label") or source_id).strip()
+    url = source_url(item)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,40}", source_id):
         return None
     if source_id in SLOTS or source_id.lower() in {"sdi1", "sdi2"}:
         return None
     if not label or len(label) > 48:
         return None
-    if not 1024 <= port <= 65535:
+    if url is None or not valid_source_url(url):
         return None
-    return {"id": source_id, "label": label, "port": port}
+    return {"id": source_id, "label": label, "url": url}
 
 
 def seed_sources() -> list[dict]:
@@ -140,7 +179,7 @@ def seed_sources() -> list[dict]:
     if parsed:
         return parsed
     names = [part.strip() for part in cfg("SOURCES", "p3-1,p3-2,p3-3,p3-4").split(",") if part.strip()]
-    return [{"id": name, "label": name, "port": 3001 + index} for index, name in enumerate(names)]
+    return [{"id": name, "label": name, "url": legacy_listener_url(3001 + index)} for index, name in enumerate(names)]
 
 
 def parse_mediamtx_sources() -> list[dict]:
@@ -158,14 +197,14 @@ def parse_mediamtx_sources() -> list[dict]:
             continue
         if re.match(r"^  [^ #\s].*:$", line):
             name = line.strip()[:-1]
-            current = None if name in SLOTS else {"id": name, "label": name, "port": 0}
+            current = None if name in SLOTS else {"id": name, "label": name}
             if current:
                 found.append(current)
             continue
-        if current and "srt://" in line:
-            match = re.search(r":(\d+)", line)
-            if match:
-                current["port"] = int(match.group(1))
+        if current and re.match(r"^\s+source:\s+", line):
+            value = re.sub(r"^\s+source:\s+", "", line).strip().strip("'\"")
+            if value and value != "publisher":
+                current["url"] = value
     return [item for item in (normalize_source(item) for item in found) if item]
 
 
@@ -178,6 +217,8 @@ def load_catalog() -> None:
         except json.JSONDecodeError:
             raw = []
         catalog = [item for item in (normalize_source(item) for item in raw if isinstance(item, dict)) if item]
+        if isinstance(raw, list) and any(isinstance(item, dict) and not item.get("url") for item in raw):
+            save_catalog()
         return
     catalog = seed_sources()
     save_catalog()
@@ -206,7 +247,7 @@ def write_mediamtx() -> None:
     for item in catalog:
         lines.extend([
             f"  {item['id']}:",
-            f"    source: srt://127.0.0.1:{item['port']}?mode=listener",
+            f"    source: {yaml_quote(item['url'])}",
             "    sourceOnDemand: false",
             "",
         ])
@@ -242,7 +283,7 @@ def mediamtx_call(method: str, path: str, body: dict | None = None) -> tuple[int
 
 def publish_source(item: dict, replace: bool = True) -> str | None:
     payload = {
-        "source": f"srt://127.0.0.1:{item['port']}?mode=listener",
+        "source": item["url"],
         "sourceOnDemand": False,
     }
     quoted = urllib.parse.quote(item["id"], safe="")
@@ -266,20 +307,25 @@ def validate_source(payload: dict, current_id: str | None = None) -> dict:
     item = normalize_source({
         "id": current_id if current_id else payload.get("id"),
         "label": payload.get("label"),
+        "url": payload.get("url"),
         "port": payload.get("port"),
     })
     if item is None:
-        raise ValueError("Name, path ID, or port is invalid.")
+        raise ValueError("Name, path ID, or source URL is invalid.")
     for other in catalog:
         if other["id"] == item["id"]:
             continue
-        if other["port"] == item["port"]:
-            raise ValueError(f"Port {item['port']} is already used by {other['label']}.")
+        if other["url"] == item["url"]:
+            raise ValueError(f"That source URL is already used by {other['label']}.")
+        mine = local_port(item["url"])
+        theirs = local_port(other["url"])
+        if mine and theirs and mine == theirs:
+            raise ValueError(f"Port {mine} is already used by {other['label']}.")
     if current_id is None and any(other["id"] == item["id"] for other in catalog):
         raise ValueError("That path ID already exists.")
-    blocked = {80, 8090, 8554, 8888, 8889, 9997, 1935}
-    if item["port"] in blocked:
-        raise ValueError(f"Port {item['port']} is used by another service.")
+    port = local_port(item["url"])
+    if port in BLOCKED_PORTS:
+        raise ValueError(f"Port {port} is used by another service.")
     return item
 
 
@@ -723,7 +769,7 @@ def snapshot() -> dict:
             {
                 "id": source["id"],
                 "label": source["label"],
-                "port": source["port"],
+                "url": source["url"],
                 "ready": bool(ready.get(source["id"])),
                 "whep": f"{web}/{urllib.parse.quote(source['id'])}/whep",
                 "routedTo": routed.get(source["id"], []),
@@ -835,8 +881,8 @@ def update_source(source_id: str, payload: dict) -> str | None:
                 catalog[index] = item
                 break
         save_catalog()
-        port_changed = previous["port"] != item["port"]
-    if not port_changed:
+        url_changed = previous["url"] != item["url"]
+    if not url_changed:
         return None
     write_mediamtx()
     return publish_source(item, replace=True)

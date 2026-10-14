@@ -23,7 +23,7 @@
       <div class="section-head split">
         <div>
           <h2>Inputs</h2>
-          <p>Drag a name onto an SDI slot. Display name and SRT port can be edited here.</p>
+          <p>Drag a name onto an SDI slot. Display name and source URL can be edited here.</p>
         </div>
         <button type="button" id="add-source">Add input</button>
       </div>
@@ -34,8 +34,8 @@
         <label>Path ID
           <input name="id" maxlength="41" required>
         </label>
-        <label>SRT port
-          <input name="port" type="number" min="1024" max="65535" required>
+        <label>Source URL
+          <input name="url" type="text" maxlength="300" spellcheck="false" autocomplete="off" placeholder="srt://127.0.0.1:3001?mode=listener" required>
         </label>
         <div class="editor-actions">
           <button type="submit">Save</button>

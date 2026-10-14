@@ -212,7 +212,7 @@ function shell() {
       <div class="card-foot">
         <div class="card-drag" draggable="true">
           <span class="name" data-label="${esc(source.id)}"></span>
-          <span class="hint" data-port="${esc(source.id)}"></span>
+          <span class="hint" data-url="${esc(source.id)}"></span>
         </div>
         <button type="button" data-edit="${esc(source.id)}">Edit</button>
         <span class="badge" data-badge="${source.id}"></span>
@@ -334,7 +334,7 @@ function paint() {
     badgeEl.className = `badge ${kind}`;
     badgeEl.textContent = text;
     card.querySelector("[data-label]").textContent = source.label;
-    card.querySelector("[data-port]").textContent = `SRT ${source.port}`;
+    card.querySelector("[data-url]").textContent = source.url;
   });
 
   Object.entries(state.slots).forEach(([id, slot]) => {
@@ -409,11 +409,15 @@ async function tick() {
   }
 }
 
-function nextPort() {
-  const used = new Set(state.sources.map((source) => source.port));
+function nextUrl() {
+  const used = new Set(state.sources.map((source) => source.url));
   let port = 3001;
-  while (used.has(port)) port += 1;
-  return port;
+  let url = `srt://127.0.0.1:${port}?mode=listener`;
+  while (used.has(url)) {
+    port += 1;
+    url = `srt://127.0.0.1:${port}?mode=listener`;
+  }
+  return url;
 }
 
 function openEditor(source) {
@@ -421,7 +425,7 @@ function openEditor(source) {
   sourceForm.elements.label.value = source ? source.label : "";
   sourceForm.elements.id.value = source ? source.id : "";
   sourceForm.elements.id.disabled = Boolean(source);
-  sourceForm.elements.port.value = source ? source.port : nextPort();
+  sourceForm.elements.url.value = source ? source.url : nextUrl();
   sourceForm.dataset.editing = source ? source.id : "";
   document.querySelector("#delete-source").hidden = !source;
   sourceForm.elements.label.focus();
@@ -460,7 +464,7 @@ sourceForm.addEventListener("submit", async (event) => {
   const editing = sourceForm.dataset.editing;
   const body = {
     label: sourceForm.elements.label.value.trim(),
-    port: Number(sourceForm.elements.port.value),
+    url: sourceForm.elements.url.value.trim(),
   };
   if (!editing) body.id = sourceForm.elements.id.value.trim();
   const path = editing ? `/api/sources/${encodeURIComponent(editing)}` : "/api/sources";
