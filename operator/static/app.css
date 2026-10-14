@@ -50,9 +50,10 @@ h2 { font-size: 15px; font-weight: 600; }
 
 main { display: grid; gap: 22px; padding: 18px 0 32px; }
 .section-head { display: grid; gap: 4px; margin-bottom: 10px; }
+.section-head.split { display: flex; justify-content: space-between; align-items: end; gap: 12px; }
 
 .sources, .slots { display: grid; gap: 12px; }
-.sources { grid-template-columns: repeat(4, 1fr); }
+.sources { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
 .slots { grid-template-columns: 1fr 1fr; }
 
 .card, .slot {
@@ -89,11 +90,25 @@ main { display: grid; gap: 22px; padding: 18px 0 32px; }
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  cursor: grab;
 }
-.card-foot:active { cursor: grabbing; }
+.card-drag { display: grid; gap: 2px; cursor: grab; min-width: 0; flex: 1; }
+.card-drag:active { cursor: grabbing; }
+.card-drag .hint { font-size: 12px; }
 
-.name { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 14px; }
+.editor {
+  display: grid;
+  grid-template-columns: 1.4fr 1fr 0.7fr auto;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 12px;
+  padding: 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.editor-actions { display: flex; gap: 8px; }
+
+.name { font-size: 14px; }
 
 .badge {
   font-size: 11px;
@@ -162,5 +177,5 @@ button:disabled, select:disabled { opacity: 0.5; cursor: default; }
 
 @media (max-width: 980px) {
   .sources { grid-template-columns: 1fr 1fr; }
-  .slots, .controls { grid-template-columns: 1fr; }
+  .slots, .controls, .editor { grid-template-columns: 1fr; }
 }

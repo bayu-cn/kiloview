@@ -14,9 +14,11 @@ services:
       LD_LIBRARY_PATH: /host-usr/lib/x86_64-linux-gnu:/host-usr/lib:/host-lib/x86_64-linux-gnu
       GST_PLUGIN_PATH: /host-usr/lib/x86_64-linux-gnu/gstreamer-1.0
       GST_PLUGIN_SYSTEM_PATH: /host-usr/lib/x86_64-linux-gnu/gstreamer-1.0
+      MEDIAMTX_CONFIG: /etc/mediamtx/mediamtx.yml
     volumes:
       - ./config.env:/app/config.env:ro
       - ./data:/data
+      - ../mediamtx/mediamtx.yml:/etc/mediamtx/mediamtx.yml
       - /dev:/dev
       - /usr:/host-usr:ro
       - /lib:/host-lib:ro

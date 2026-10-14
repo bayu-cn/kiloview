@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import secrets
 import signal
 import subprocess
@@ -109,8 +110,177 @@ def allowed_roles() -> set[str]:
 
 
 def sources() -> list[str]:
-    raw = cfg("SOURCES", "p3-1,p3-2,p3-3,p3-4")
-    return [part.strip() for part in raw.split(",") if part.strip()]
+    return [item["id"] for item in catalog]
+
+
+def sources_path() -> Path:
+    return STATE_PATH.parent / "sources.json"
+
+
+def normalize_source(item: dict) -> dict | None:
+    source_id = str(item.get("id", "")).strip()
+    label = str(item.get("label") or source_id).strip()
+    try:
+        port = int(item.get("port"))
+    except (TypeError, ValueError):
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,40}", source_id):
+        return None
+    if source_id in SLOTS or source_id.lower() in {"sdi1", "sdi2"}:
+        return None
+    if not label or len(label) > 48:
+        return None
+    if not 1024 <= port <= 65535:
+        return None
+    return {"id": source_id, "label": label, "port": port}
+
+
+def seed_sources() -> list[dict]:
+    parsed = parse_mediamtx_sources()
+    if parsed:
+        return parsed
+    names = [part.strip() for part in cfg("SOURCES", "p3-1,p3-2,p3-3,p3-4").split(",") if part.strip()]
+    return [{"id": name, "label": name, "port": 3001 + index} for index, name in enumerate(names)]
+
+
+def parse_mediamtx_sources() -> list[dict]:
+    path = mediamtx_config_path()
+    if path is None or not path.exists():
+        return []
+    found = []
+    current: dict | None = None
+    in_paths = False
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.startswith("paths:"):
+            in_paths = True
+            continue
+        if not in_paths:
+            continue
+        if re.match(r"^  [^ #\s].*:$", line):
+            name = line.strip()[:-1]
+            current = None if name in SLOTS else {"id": name, "label": name, "port": 0}
+            if current:
+                found.append(current)
+            continue
+        if current and "srt://" in line:
+            match = re.search(r":(\d+)", line)
+            if match:
+                current["port"] = int(match.group(1))
+    return [item for item in (normalize_source(item) for item in found) if item]
+
+
+def load_catalog() -> None:
+    global catalog
+    path = sources_path()
+    if path.exists():
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            raw = []
+        catalog = [item for item in (normalize_source(item) for item in raw if isinstance(item, dict)) if item]
+        return
+    catalog = seed_sources()
+    save_catalog()
+
+
+def save_catalog() -> None:
+    path = sources_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(catalog, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def mediamtx_config_path() -> Path | None:
+    raw = cfg("MEDIAMTX_CONFIG")
+    return Path(raw) if raw else None
+
+
+def write_mediamtx() -> None:
+    path = mediamtx_config_path()
+    if path is None or not path.exists():
+        return
+    text = path.read_text(encoding="utf-8")
+    head = text.split("paths:", 1)[0].rstrip() if "paths:" in text else text.rstrip()
+    lines = ["paths:"]
+    for item in catalog:
+        lines.extend([
+            f"  {item['id']}:",
+            f"    source: srt://127.0.0.1:{item['port']}?mode=listener",
+            "    sourceOnDemand: false",
+            "",
+        ])
+    lines.extend([
+        "  # Preview operator. Diisi GStreamer, bukan SRT.",
+        "  sdi1:",
+        "    source: publisher",
+        "",
+        "  sdi2:",
+        "    source: publisher",
+        "",
+    ])
+    path.write_text(head + "\n" + "\n".join(lines), encoding="utf-8")
+
+
+def mediamtx_call(method: str, path: str, body: dict | None = None) -> tuple[int, str]:
+    url = cfg("MEDIAMTX_API", "http://127.0.0.1:9997").rstrip("/") + path
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3) as response:
+            return response.status, response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read().decode("utf-8", errors="replace")
+    except (OSError, urllib.error.URLError, TimeoutError) as exc:
+        return 0, str(exc)
+
+
+def publish_source(item: dict, replace: bool = True) -> str | None:
+    payload = {
+        "source": f"srt://127.0.0.1:{item['port']}?mode=listener",
+        "sourceOnDemand": False,
+    }
+    quoted = urllib.parse.quote(item["id"], safe="")
+    code, detail = mediamtx_call("POST", f"/v3/config/paths/add/{quoted}", payload)
+    if code in (200, 201, 204):
+        return None
+    if not replace and "exist" in detail.lower():
+        return None
+    code, detail = mediamtx_call("POST", f"/v3/config/paths/replace/{quoted}", payload)
+    if code in (200, 201, 204):
+        return None
+    return f"MediaMTX belum memakai {item['id']}: {detail or code}"
+
+
+def ensure_sources() -> None:
+    for item in catalog:
+        publish_source(item, replace=False)
+
+
+def validate_source(payload: dict, current_id: str | None = None) -> dict:
+    item = normalize_source({
+        "id": current_id if current_id else payload.get("id"),
+        "label": payload.get("label"),
+        "port": payload.get("port"),
+    })
+    if item is None:
+        raise ValueError("Nama, ID, atau port tidak valid.")
+    for other in catalog:
+        if other["id"] == item["id"]:
+            continue
+        if other["port"] == item["port"]:
+            raise ValueError(f"Port {item['port']} sudah dipakai {other['label']}.")
+    if current_id is None and any(other["id"] == item["id"] for other in catalog):
+        raise ValueError("ID sumber sudah ada.")
+    blocked = {80, 8090, 8554, 8888, 8889, 9997, 1935}
+    if item["port"] in blocked:
+        raise ValueError(f"Port {item['port']} dipakai layanan lain.")
+    return item
 
 
 def public_url() -> str:
@@ -152,6 +322,7 @@ def load_state() -> dict:
     return slots
 
 
+catalog: list[dict] = []
 state = {}
 
 
@@ -550,13 +721,14 @@ def snapshot() -> dict:
         "user": None,
         "sources": [
             {
-                "id": source,
-                "label": source,
-                "ready": bool(ready.get(source)),
-                "whep": f"{web}/{urllib.parse.quote(source)}/whep",
-                "routedTo": routed.get(source, []),
+                "id": source["id"],
+                "label": source["label"],
+                "port": source["port"],
+                "ready": bool(ready.get(source["id"])),
+                "whep": f"{web}/{urllib.parse.quote(source['id'])}/whep",
+                "routedTo": routed.get(source["id"], []),
             }
-            for source in sources()
+            for source in catalog
         ],
         "slots": slots_out,
     }
@@ -641,6 +813,46 @@ def current_session(handler: BaseHTTPRequestHandler) -> dict | None:
         sessions.pop(sid, None)
         return None
     return session
+
+
+def add_source(payload: dict) -> str | None:
+    with lock:
+        item = validate_source(payload)
+        catalog.append(item)
+        save_catalog()
+    write_mediamtx()
+    return publish_source(item, replace=True)
+
+
+def update_source(source_id: str, payload: dict) -> str | None:
+    with lock:
+        previous = next((item for item in catalog if item["id"] == source_id), None)
+        if previous is None:
+            raise ValueError("Sumber tidak dikenal.")
+        item = validate_source(payload, current_id=source_id)
+        for index, other in enumerate(catalog):
+            if other["id"] == source_id:
+                catalog[index] = item
+                break
+        save_catalog()
+        port_changed = previous["port"] != item["port"]
+    if not port_changed:
+        return None
+    write_mediamtx()
+    return publish_source(item, replace=True)
+
+
+def delete_source(source_id: str) -> None:
+    with lock:
+        if any(slot["source"] == source_id for slot in state.values()):
+            raise ValueError("Lepas sumber ini dari SDI dulu.")
+        if source_id not in sources():
+            raise ValueError("Sumber tidak dikenal.")
+        catalog[:] = [item for item in catalog if item["id"] != source_id]
+        save_catalog()
+    write_mediamtx()
+    quoted = urllib.parse.quote(source_id, safe="")
+    mediamtx_call("DELETE", f"/v3/config/paths/delete/{quoted}")
 
 
 def apply_slot(slot_id: str, payload: dict) -> None:
@@ -734,6 +946,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urllib.parse.urlsplit(self.path).path
+        if path == "/api/sources" or path.startswith("/api/sources/"):
+            self.handle_source(path)
+            return
         prefix = "/api/slots/"
         if not path.startswith(prefix):
             self.send_json(404, {"error": "Tidak ditemukan."})
@@ -763,6 +978,47 @@ class Handler(BaseHTTPRequestHandler):
             return
         body = snapshot()
         body["user"] = session.get("user")
+        self.send_json(200, body)
+
+    def read_json(self) -> dict:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        if length > 8000:
+            raise ValueError("Permintaan terlalu besar.")
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError("JSON tidak valid.") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("JSON tidak valid.")
+        return payload
+
+    def handle_source(self, path: str) -> None:
+        session = current_session(self)
+        if session is None:
+            self.send_json(401, {"error": "Login diperlukan."})
+            return
+        try:
+            if path.endswith("/delete"):
+                source_id = urllib.parse.unquote(path[len("/api/sources/"):-len("/delete")])
+                delete_source(source_id)
+                warning = None
+            else:
+                payload = self.read_json()
+                if path == "/api/sources":
+                    warning = add_source(payload)
+                else:
+                    source_id = urllib.parse.unquote(path[len("/api/sources/"):])
+                    warning = update_source(source_id, payload)
+        except ValueError as exc:
+            self.send_json(400, {"error": str(exc)})
+            return
+        except OSError as exc:
+            self.send_json(500, {"error": f"Gagal menyimpan konfigurasi MediaMTX: {exc}"})
+            return
+        body = snapshot()
+        body["user"] = session.get("user")
+        if warning:
+            body["warning"] = warning
         self.send_json(200, body)
 
     def handle_state(self) -> None:
@@ -868,6 +1124,12 @@ def main() -> None:
     global state
     load_env_file()
     apply_paths()
+    load_catalog()
+    try:
+        write_mediamtx()
+    except OSError as exc:
+        print(f"MediaMTX config tidak tertulis: {exc}", flush=True)
+    ensure_sources()
     state = load_state()
     with lock:
         for slot_id, slot in state.items():

@@ -13,6 +13,8 @@ const sourcesEl = document.querySelector("#sources");
 const slotsEl = document.querySelector("#slots");
 const userEl = document.querySelector("#user");
 const logoutEl = document.querySelector("#logout");
+const sourceForm = document.querySelector("#source-form");
+const addSourceButton = document.querySelector("#add-source");
 
 let state = null;
 const players = new Map();
@@ -207,8 +209,12 @@ function shell() {
       <div class="preview">
         <video data-preview="${esc(source.id)}" playsinline autoplay muted></video>
       </div>
-      <div class="card-foot" draggable="true">
-        <span class="name">${esc(source.label)}</span>
+      <div class="card-foot">
+        <div class="card-drag" draggable="true">
+          <span class="name" data-label="${esc(source.id)}"></span>
+          <span class="hint" data-port="${esc(source.id)}"></span>
+        </div>
+        <button type="button" data-edit="${esc(source.id)}">Ubah</button>
         <span class="badge" data-badge="${source.id}"></span>
       </div>
     </article>
@@ -253,13 +259,17 @@ function shell() {
   `).join("");
 
   sourcesEl.querySelectorAll(".card").forEach((card) => {
-    const handle = card.querySelector(".card-foot");
+    const handle = card.querySelector(".card-drag");
     handle.addEventListener("dragstart", (event) => {
       event.dataTransfer.setData("text/plain", card.dataset.source);
       event.dataTransfer.effectAllowed = "copy";
       card.classList.add("dragging");
     });
     handle.addEventListener("dragend", () => card.classList.remove("dragging"));
+    card.querySelector("[data-edit]").addEventListener("click", () => {
+      const source = state.sources.find((item) => item.id === card.dataset.source);
+      if (source) openEditor(source);
+    });
   });
 
   slotsEl.querySelectorAll(".slot").forEach((slot) => {
@@ -323,6 +333,8 @@ function paint() {
     const badgeEl = card.querySelector("[data-badge]");
     badgeEl.className = `badge ${kind}`;
     badgeEl.textContent = text;
+    card.querySelector("[data-label]").textContent = source.label;
+    card.querySelector("[data-port]").textContent = `SRT ${source.port}`;
   });
 
   Object.entries(state.slots).forEach(([id, slot]) => {
@@ -378,10 +390,14 @@ async function tick() {
   try {
     const next = await api("/api/state");
     if (!next) return;
+    const sourceKey = next.sources.map((source) => source.id).join(",");
     if (!state) {
       state = next;
       userEl.textContent = next.user ? `${next.user}` : "LAN tanpa login";
       logoutEl.hidden = !next.auth;
+      shell();
+    } else if (state.sources.map((source) => source.id).join(",") !== sourceKey) {
+      state = next;
       shell();
     } else {
       state = next;
@@ -392,6 +408,69 @@ async function tick() {
     console.error(error);
   }
 }
+
+function nextPort() {
+  const used = new Set(state.sources.map((source) => source.port));
+  let port = 3001;
+  while (used.has(port)) port += 1;
+  return port;
+}
+
+function openEditor(source) {
+  sourceForm.hidden = false;
+  sourceForm.elements.label.value = source ? source.label : "";
+  sourceForm.elements.id.value = source ? source.id : "";
+  sourceForm.elements.id.disabled = Boolean(source);
+  sourceForm.elements.port.value = source ? source.port : nextPort();
+  sourceForm.dataset.editing = source ? source.id : "";
+  document.querySelector("#delete-source").hidden = !source;
+  sourceForm.elements.label.focus();
+}
+
+function closeEditor() {
+  sourceForm.hidden = true;
+  sourceForm.dataset.editing = "";
+}
+
+async function applySourceResponse(next) {
+  if (!next) return;
+  if (next.warning) window.alert(next.warning);
+  const sourceKey = next.sources.map((source) => source.id).join(",");
+  const changed = !state || state.sources.map((source) => source.id).join(",") !== sourceKey;
+  state = next;
+  if (changed) shell();
+  paint();
+  closeEditor();
+}
+
+addSourceButton.addEventListener("click", () => openEditor(null));
+document.querySelector("#cancel-source").addEventListener("click", closeEditor);
+document.querySelector("#delete-source").addEventListener("click", async () => {
+  const sourceId = sourceForm.dataset.editing;
+  if (!sourceId) return;
+  try {
+    const next = await api(`/api/sources/${encodeURIComponent(sourceId)}/delete`, { method: "POST", body: "{}" });
+    await applySourceResponse(next);
+  } catch (error) {
+    window.alert(error.message);
+  }
+});
+sourceForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const editing = sourceForm.dataset.editing;
+  const body = {
+    label: sourceForm.elements.label.value.trim(),
+    port: Number(sourceForm.elements.port.value),
+  };
+  if (!editing) body.id = sourceForm.elements.id.value.trim();
+  const path = editing ? `/api/sources/${encodeURIComponent(editing)}` : "/api/sources";
+  try {
+    const next = await api(path, { method: "POST", body: JSON.stringify(body) });
+    await applySourceResponse(next);
+  } catch (error) {
+    window.alert(error.message);
+  }
+});
 
 tick();
 setInterval(tick, 2000);

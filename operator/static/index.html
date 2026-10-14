@@ -20,10 +20,29 @@
 
   <main>
     <section>
-      <div class="section-head">
-        <h2>Sumber</h2>
-        <p>Gambar sumber lewat WebRTC supaya tidak mudah berhenti. Seret nama sumber ke slot SDI.</p>
+      <div class="section-head split">
+        <div>
+          <h2>Sumber</h2>
+          <p>Seret nama sumber ke slot SDI. Nama tampilan dan port SRT bisa diubah. Sumber baru langsung didaftarkan ke MediaMTX.</p>
+        </div>
+        <button type="button" id="add-source">Tambah sumber</button>
       </div>
+      <form id="source-form" class="editor" hidden>
+        <label>Nama tampilan
+          <input name="label" maxlength="48" required>
+        </label>
+        <label>ID path
+          <input name="id" maxlength="41" required>
+        </label>
+        <label>Port SRT
+          <input name="port" type="number" min="1024" max="65535" required>
+        </label>
+        <div class="editor-actions">
+          <button type="submit">Simpan</button>
+          <button type="button" id="delete-source" hidden>Hapus</button>
+          <button type="button" id="cancel-source">Batal</button>
+        </div>
+      </form>
       <div id="sources" class="sources"></div>
     </section>
 
