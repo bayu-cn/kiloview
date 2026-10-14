@@ -902,7 +902,7 @@ def session_from_token(token: dict) -> dict:
     return {
         "user": payload.get("preferred_username") or payload.get("name") or "operator",
         "admin": is_admin,
-        "access": access,
+        "access": token["access_token"],
         "refresh": token.get("refresh_token"),
         "id_token": token.get("id_token"),
         "exp": time.time() + int(token.get("expires_in", 60)) - 20,
