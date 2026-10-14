@@ -218,7 +218,7 @@ function shell() {
     <article class="slot" data-slot="${id}">
       <div class="slot-top">
         <h3>${slot.label}</h3>
-        <span class="meta">DeckLink ${slot.device}</span>
+        <span class="meta">${slot.card || ("DeckLink " + slot.device)}</span>
       </div>
       <div class="preview">
         <video data-monitor="${id}" playsinline autoplay muted></video>

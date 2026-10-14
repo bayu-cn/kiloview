@@ -65,6 +65,32 @@ def apply_paths() -> None:
         raw = cfg(env_name)
         if raw.isdigit():
             SLOTS[slot_id]["device"] = int(raw)
+    for slot_id, env_name in (("sdi1", "SDI1_PERSISTENT_ID"), ("sdi2", "SDI2_PERSISTENT_ID")):
+        parsed = parse_persistent_id(cfg(env_name))
+        if parsed is not None:
+            SLOTS[slot_id]["persistent_id"] = parsed
+
+
+def parse_persistent_id(raw: str) -> int | None:
+    text = raw.strip().lower()
+    if text.startswith("p"):
+        text = text[1:]
+    if text.startswith("0x"):
+        text = text[2:]
+    if not text:
+        return None
+    try:
+        base = 16 if any(ch in text for ch in "abcdef") else 10
+        return int(text, base)
+    except ValueError:
+        return None
+
+
+def sink_device_args(slot_id: str) -> list[str]:
+    persistent = SLOTS[slot_id].get("persistent_id")
+    if persistent is not None:
+        return [f"persistent-id={persistent}"]
+    return [f"device-number={SLOTS[slot_id]['device']}"]
 
 
 def cfg(name: str, default: str = "") -> str:
@@ -229,7 +255,6 @@ def preview_args(slot_id: str) -> list[str] | None:
 
 def pipeline_args(slot_id: str) -> list[str]:
     slot = state[slot_id]
-    device = SLOTS[slot_id]["device"]
     mode = slot["mode"]
     location = f"{cfg('RTSP_BASE', 'rtsp://127.0.0.1:8554').rstrip('/')}/{slot['source']}"
     decklink_mode = "1080p60" if mode == "1080p60" else "1080i50"
@@ -240,10 +265,10 @@ def pipeline_args(slot_id: str) -> list[str]:
         "rtspsrc", f"location={location}", "latency=200", "protocols=tcp", "name=src",
         "src.", "!", "application/x-rtp,media=video", "!", "decodebin", "!", "queue", "!", "video/x-raw", "!",
         *video_args(mode), "!",
-        "decklinkvideosink", f"device-number={device}", f"mode={decklink_mode}", "sync=false",
+        "decklinkvideosink", *sink_device_args(slot_id), f"mode={decklink_mode}", "sync=false",
         "src.", "!", "application/x-rtp,media=audio", "!", "decodebin", "!", "queue", "!",
         *audio_args(slot["audio"]), "!",
-        "decklinkaudiosink", f"device-number={device}", "sync=false", "async=false",
+        "decklinkaudiosink", *sink_device_args(slot_id), "sync=false", "async=false",
     ]
 
 
@@ -283,9 +308,7 @@ def read_log(slot_id: str, suffix: str = "", limit: int = 40) -> str:
 def explain_sdi_error(text: str, device: int) -> str:
     if "Failed to start" in text or "doesn't want to preroll" in text:
         return (
-            f"DeckLink device {device} tidak bisa mulai. "
-            "DeckLink 4K Extreme hanya punya satu keluaran. "
-            "Soket SDI yang lain menampilkan gambar yang sama, bukan program kedua.\n"
+            f"Kartu ini tidak bisa mulai. Cek ID di config: SDI 1 dan SDI 2 harus dua kartu yang berbeda.\n"
             + text
         )
     return text
@@ -509,9 +532,11 @@ def snapshot() -> dict:
         run = runs_copy[slot_id]
         if slot["source"]:
             routed.setdefault(slot["source"], []).append(meta["label"])
+        pid = meta.get("persistent_id")
         slots_out[slot_id] = {
             "label": meta["label"],
             "device": meta["device"],
+            "card": f"P{pid:08x}" if pid else f"device {meta['device']}",
             "source": slot["source"],
             "mode": slot["mode"],
             "audio": slot["audio"],
