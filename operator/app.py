@@ -1167,8 +1167,12 @@ class Handler(BaseHTTPRequestHandler):
         except PermissionError as exc:
             self.send_html(403, message_page("Access denied", str(exc)))
             return
-        except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError):
-            self.send_html(502, message_page("Login failed", "Keycloak did not return a token."))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:300]
+            self.send_html(502, message_page("Login failed", f"Keycloak rejected the login ({exc.code}). {detail}"))
+            return
+        except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError) as exc:
+            self.send_html(502, message_page("Login failed", f"Keycloak did not return a token. {exc}"))
             return
         sid = secrets.token_urlsafe(32)
         sessions[sid] = session
