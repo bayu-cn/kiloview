@@ -4,9 +4,9 @@ const MODES = [
 ];
 
 const AUDIO = [
-  ["1-2", "1-2 · stereo asli"],
-  ["1-1", "1-1 · kanal 1 ke kedua sisi"],
-  ["2-2", "2-2 · kanal 2 ke kedua sisi"],
+  ["1-2", "1-2 · original stereo"],
+  ["1-1", "1-1 · ch 1 to both"],
+  ["2-2", "2-2 · ch 2 to both"],
 ];
 
 const sourcesEl = document.querySelector("#sources");
@@ -186,21 +186,21 @@ async function api(path, options = {}) {
     return null;
   }
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || "Permintaan gagal");
+  if (!res.ok) throw new Error(body.error || "Request failed");
   return body;
 }
 
 function badge(source) {
   if (source.routedTo.length) return ["onair", source.routedTo.join(" · ")];
-  if (source.ready) return ["live", "masuk"];
-  return ["", "tidak ada sinyal"];
+  if (source.ready) return ["live", "live"];
+  return ["", "no signal"];
 }
 
 function statusText(slot) {
-  if (slot.status === "playing") return "Tayang";
-  if (slot.status === "starting") return "Mengunci sinyal…";
-  if (slot.status === "error") return "Gagal keluar ke SDI";
-  return "Kosong";
+  if (slot.status === "playing") return "On air";
+  if (slot.status === "starting") return "Locking...";
+  if (slot.status === "error") return "SDI output failed";
+  return "Empty";
 }
 
 function shell() {
@@ -214,7 +214,7 @@ function shell() {
           <span class="name" data-label="${esc(source.id)}"></span>
           <span class="hint" data-port="${esc(source.id)}"></span>
         </div>
-        <button type="button" data-edit="${esc(source.id)}">Ubah</button>
+        <button type="button" data-edit="${esc(source.id)}">Edit</button>
         <span class="badge" data-badge="${source.id}"></span>
       </div>
     </article>
@@ -230,8 +230,8 @@ function shell() {
         <video data-monitor="${id}" playsinline autoplay muted></video>
       </div>
       <div class="listen">
-        <button type="button" data-hear="${id}">Dengar</button>
-        <label>Volume monitor
+        <button type="button" data-hear="${id}">Listen</button>
+        <label>Monitor volume
           <input type="range" min="0" max="100" value="${Math.round(savedVolume(id) * 100)}" data-volume="${id}">
         </label>
       </div>
@@ -241,7 +241,7 @@ function shell() {
       </div>
       <p class="status" data-status="${id}"></p>
       <div class="controls">
-        <label>Mode video
+        <label>Video mode
           <select data-mode="${id}">
             ${MODES.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}
           </select>
@@ -251,7 +251,7 @@ function shell() {
             ${AUDIO.map(([value, label]) => `<option value="${value}">${label}</option>`).join("")}
           </select>
         </label>
-        <button type="button" data-clear="${id}">Lepas</button>
+        <button type="button" data-clear="${id}">Clear</button>
       </div>
       <p class="note" data-preview-note="${id}" hidden></p>
       <pre class="log" data-log="${id}" hidden></pre>
@@ -306,7 +306,7 @@ function shell() {
       const record = players.get(video);
       if (record) record.heard = !hearing;
       if (!hearing) video.play().catch(() => {});
-      event.currentTarget.textContent = hearing ? "Dengar" : "Senyap";
+      event.currentTarget.textContent = hearing ? "Listen" : "Mute";
     });
     slot.querySelector("[data-volume]").addEventListener("input", (event) => {
       const level = Number(event.target.value) / 100;
@@ -342,8 +342,8 @@ function paint() {
     box.classList.toggle("playing", slot.status === "playing");
     const assigned = box.querySelector("[data-assigned]");
     const hint = box.querySelector("[data-hint]");
-    assigned.textContent = slot.source || "Kosong";
-    hint.textContent = slot.source ? "Seret sumber lain untuk mengganti" : "Seret sumber ke sini";
+    assigned.textContent = slot.source || "Empty";
+    hint.textContent = slot.source ? "Drop another source to replace" : "Drop a source here";
     const status = box.querySelector("[data-status]");
     status.className = `status ${slot.status}`;
     status.textContent = statusText(slot);
@@ -365,7 +365,7 @@ function paint() {
     if (note.textContent !== noteText) note.textContent = noteText;
     const hear = box.querySelector("[data-hear]");
     const video = box.querySelector("[data-monitor]");
-    hear.textContent = video.dataset.heard === "1" ? "Senyap" : "Dengar";
+    hear.textContent = video.dataset.heard === "1" ? "Mute" : "Listen";
     hear.disabled = !slot.source;
   });
   syncMedia();
@@ -393,7 +393,7 @@ async function tick() {
     const sourceKey = next.sources.map((source) => source.id).join(",");
     if (!state) {
       state = next;
-      userEl.textContent = next.user ? `${next.user}` : "LAN tanpa login";
+      userEl.textContent = next.user ? `${next.user}` : "LAN, no login";
       logoutEl.hidden = !next.auth;
       shell();
     } else if (state.sources.map((source) => source.id).join(",") !== sourceKey) {

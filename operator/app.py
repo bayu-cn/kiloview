@@ -254,7 +254,7 @@ def publish_source(item: dict, replace: bool = True) -> str | None:
     code, detail = mediamtx_call("POST", f"/v3/config/paths/replace/{quoted}", payload)
     if code in (200, 201, 204):
         return None
-    return f"MediaMTX belum memakai {item['id']}: {detail or code}"
+    return f"MediaMTX did not accept {item['id']}: {detail or code}"
 
 
 def ensure_sources() -> None:
@@ -269,17 +269,17 @@ def validate_source(payload: dict, current_id: str | None = None) -> dict:
         "port": payload.get("port"),
     })
     if item is None:
-        raise ValueError("Nama, ID, atau port tidak valid.")
+        raise ValueError("Name, path ID, or port is invalid.")
     for other in catalog:
         if other["id"] == item["id"]:
             continue
         if other["port"] == item["port"]:
-            raise ValueError(f"Port {item['port']} sudah dipakai {other['label']}.")
+            raise ValueError(f"Port {item['port']} is already used by {other['label']}.")
     if current_id is None and any(other["id"] == item["id"] for other in catalog):
-        raise ValueError("ID sumber sudah ada.")
+        raise ValueError("That path ID already exists.")
     blocked = {80, 8090, 8554, 8888, 8889, 9997, 1935}
     if item["port"] in blocked:
-        raise ValueError(f"Port {item['port']} dipakai layanan lain.")
+        raise ValueError(f"Port {item['port']} is used by another service.")
     return item
 
 
@@ -479,7 +479,7 @@ def read_log(slot_id: str, suffix: str = "", limit: int = 40) -> str:
 def explain_sdi_error(text: str, device: int) -> str:
     if "Failed to start" in text or "doesn't want to preroll" in text:
         return (
-            f"Kartu ini tidak bisa mulai. Cek ID di config: SDI 1 dan SDI 2 harus dua kartu yang berbeda.\n"
+            "This card did not start. Check the config IDs: SDI 1 and SDI 2 must be two different cards.\n"
             + text
         )
     return text
@@ -565,7 +565,7 @@ def watch_pipeline(slot_id: str, generation: int, proc: subprocess.Popen) -> Non
             threading.Thread(target=restart_later, args=(slot_id, generation), daemon=True).start()
             return
         run["status"] = "error"
-        run["error"] = explain_sdi_error(useful_log(slot_id), SLOTS[slot_id]["device"]) or f"GStreamer berhenti (kode {proc.returncode})"
+        run["error"] = explain_sdi_error(useful_log(slot_id), SLOTS[slot_id]["device"]) or f"GStreamer stopped (code {proc.returncode})"
 
 
 def restart_later(slot_id: str, generation: int) -> None:
@@ -594,8 +594,8 @@ def start_preview(slot_id: str) -> None:
     args = preview_args(slot_id)
     if args is None:
         run["preview_error"] = (
-            "Preview SDI butuh FFmpeg di image operator. "
-            "Di server jalankan: docker compose up -d --build"
+            "SDI preview needs FFmpeg in the operator image. "
+            "On the server run: docker compose up -d --build"
         )
         return
     generation = run["preview_generation"]
@@ -633,7 +633,7 @@ def watch_preview(slot_id: str, generation: int, proc: subprocess.Popen) -> None
             run["preview_restarts"] = run.get("preview_restarts", 0) + 1
             threading.Thread(target=restart_preview_later, args=(slot_id, generation), daemon=True).start()
             return
-        run["preview_error"] = read_log(slot_id, "-preview", 8) or f"Preview berhenti (kode {proc.returncode})"
+        run["preview_error"] = read_log(slot_id, "-preview", 8) or f"Preview stopped (code {proc.returncode})"
 
 
 def restart_preview_later(slot_id: str, generation: int) -> None:
@@ -765,7 +765,7 @@ def session_from_token(token: dict) -> dict:
     payload = jwt_payload(access)
     roles = token_roles(access)
     if roles.isdisjoint(allowed_roles()):
-        raise PermissionError("Akun ini tidak punya role admin atau operator-feeddesk.")
+        raise PermissionError("This account does not have the admin or operator-feeddesk role.")
     return {
         "user": payload.get("preferred_username") or payload.get("name") or "operator",
         "roles": sorted(roles & allowed_roles()),
@@ -828,7 +828,7 @@ def update_source(source_id: str, payload: dict) -> str | None:
     with lock:
         previous = next((item for item in catalog if item["id"] == source_id), None)
         if previous is None:
-            raise ValueError("Sumber tidak dikenal.")
+            raise ValueError("Unknown source.")
         item = validate_source(payload, current_id=source_id)
         for index, other in enumerate(catalog):
             if other["id"] == source_id:
@@ -845,9 +845,9 @@ def update_source(source_id: str, payload: dict) -> str | None:
 def delete_source(source_id: str) -> None:
     with lock:
         if any(slot["source"] == source_id for slot in state.values()):
-            raise ValueError("Lepas sumber ini dari SDI dulu.")
+            raise ValueError("Clear this source from SDI before deleting it.")
         if source_id not in sources():
-            raise ValueError("Sumber tidak dikenal.")
+            raise ValueError("Unknown source.")
         catalog[:] = [item for item in catalog if item["id"] != source_id]
         save_catalog()
     write_mediamtx()
@@ -860,15 +860,15 @@ def apply_slot(slot_id: str, payload: dict) -> None:
     if "source" in payload:
         source = payload["source"]
         if source is not None and source not in sources():
-            raise ValueError("Sumber tidak dikenal.")
+            raise ValueError("Unknown source.")
         slot["source"] = source
     if "mode" in payload:
         if payload["mode"] not in MODES:
-            raise ValueError("Mode video tidak dikenal.")
+            raise ValueError("Unknown video mode.")
         slot["mode"] = payload["mode"]
     if "audio" in payload:
         if payload["audio"] not in AUDIO:
-            raise ValueError("Peta audio tidak dikenal.")
+            raise ValueError("Unknown audio map.")
         slot["audio"] = payload["audio"]
     runtime[slot_id]["restarts"] = 0
     runtime[slot_id]["preview_restarts"] = 0
@@ -942,7 +942,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             self.handle_state()
             return
-        self.send_json(404, {"error": "Tidak ditemukan."})
+        self.send_json(404, {"error": "Not found."})
 
     def do_POST(self) -> None:
         path = urllib.parse.urlsplit(self.path).path
@@ -951,24 +951,24 @@ class Handler(BaseHTTPRequestHandler):
             return
         prefix = "/api/slots/"
         if not path.startswith(prefix):
-            self.send_json(404, {"error": "Tidak ditemukan."})
+            self.send_json(404, {"error": "Not found."})
             return
         slot_id = path[len(prefix):]
         if slot_id not in SLOTS:
-            self.send_json(404, {"error": "Slot SDI tidak dikenal."})
+            self.send_json(404, {"error": "Unknown SDI slot."})
             return
         session = current_session(self)
         if session is None:
-            self.send_json(401, {"error": "Login diperlukan."})
+            self.send_json(401, {"error": "Login required."})
             return
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length > 8000:
-            self.send_json(400, {"error": "Permintaan terlalu besar."})
+            self.send_json(400, {"error": "Request is too large."})
             return
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
         except json.JSONDecodeError:
-            self.send_json(400, {"error": "JSON tidak valid."})
+            self.send_json(400, {"error": "Invalid JSON."})
             return
         try:
             with lock:
@@ -983,19 +983,19 @@ class Handler(BaseHTTPRequestHandler):
     def read_json(self) -> dict:
         length = int(self.headers.get("Content-Length", "0") or "0")
         if length > 8000:
-            raise ValueError("Permintaan terlalu besar.")
+            raise ValueError("Request is too large.")
         try:
             payload = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
         except json.JSONDecodeError as exc:
-            raise ValueError("JSON tidak valid.") from exc
+            raise ValueError("Invalid JSON.") from exc
         if not isinstance(payload, dict):
-            raise ValueError("JSON tidak valid.")
+            raise ValueError("Invalid JSON.")
         return payload
 
     def handle_source(self, path: str) -> None:
         session = current_session(self)
         if session is None:
-            self.send_json(401, {"error": "Login diperlukan."})
+            self.send_json(401, {"error": "Login required."})
             return
         try:
             if path.endswith("/delete"):
@@ -1013,7 +1013,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": str(exc)})
             return
         except OSError as exc:
-            self.send_json(500, {"error": f"Gagal menyimpan konfigurasi MediaMTX: {exc}"})
+            self.send_json(500, {"error": f"Could not save the MediaMTX config: {exc}"})
             return
         body = snapshot()
         body["user"] = session.get("user")
@@ -1024,7 +1024,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_state(self) -> None:
         session = current_session(self)
         if session is None:
-            self.send_json(401, {"error": "Login diperlukan."})
+            self.send_json(401, {"error": "Login required."})
             return
         body = snapshot()
         body["user"] = session.get("user")
@@ -1049,13 +1049,13 @@ class Handler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
         if query.get("error"):
             message = query.get("error_description", query["error"])[0]
-            self.send_html(400, message_page("Login gagal", message))
+            self.send_html(400, message_page("Login failed", message))
             return
         state_token = (query.get("state") or [""])[0]
         code = (query.get("code") or [""])[0]
         expires = oauth_states.pop(state_token, 0)
         if not code or expires < time.time():
-            self.send_html(400, message_page("Login gagal", "Sesi login sudah tidak berlaku. Coba lagi."))
+            self.send_html(400, message_page("Login failed", "The login session expired. Try again."))
             return
         try:
             token = exchange_token({
@@ -1067,10 +1067,10 @@ class Handler(BaseHTTPRequestHandler):
             })
             session = session_from_token(token)
         except PermissionError as exc:
-            self.send_html(403, message_page("Tidak punya akses", str(exc)))
+            self.send_html(403, message_page("Access denied", str(exc)))
             return
         except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError):
-            self.send_html(502, message_page("Login gagal", "Keycloak tidak mengembalikan token."))
+            self.send_html(502, message_page("Login failed", "Keycloak did not return a token."))
             return
         sid = secrets.token_urlsafe(32)
         sessions[sid] = session
@@ -1096,7 +1096,7 @@ class Handler(BaseHTTPRequestHandler):
     def serve_static(self, name: str) -> None:
         target = (STATIC / name).resolve()
         if not str(target).startswith(str(STATIC.resolve())) or not target.is_file():
-            self.send_json(404, {"error": "Tidak ditemukan."})
+            self.send_json(404, {"error": "Not found."})
             return
         kind = "text/html" if target.suffix == ".html" else "text/css" if target.suffix == ".css" else "text/javascript"
         body = target.read_bytes()
@@ -1115,7 +1115,7 @@ def message_page(title: str, message: str) -> str:
         "<!doctype html><meta charset=utf-8>"
         f"<title>{esc(title)}</title>"
         "<body style=\"font-family:sans-serif;background:#101114;color:#eceae6;padding:2rem\">"
-        f"<h1>{esc(title)}</h1><p>{esc(message)}</p><p><a style=\"color:#eceae6\" href=\"/\">Kembali</a></p>"
+        f"<h1>{esc(title)}</h1><p>{esc(message)}</p><p><a style=\"color:#eceae6\" href=\"/\">Back</a></p>"
         "</body>"
     )
 

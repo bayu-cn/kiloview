@@ -18,11 +18,15 @@
 
 body {
   margin: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--bg);
   color: var(--text);
 }
 
-header, main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; }
+header, main { width: min(1440px, calc(100% - 32px)); margin: 0 auto; }
 
 header {
   display: flex;
@@ -48,13 +52,46 @@ h2 { font-size: 15px; font-weight: 600; }
 .who { display: flex; gap: 14px; align-items: center; color: var(--muted); font-size: 14px; }
 .who a { color: var(--text); }
 
-main { display: grid; gap: 22px; padding: 18px 0 32px; }
-.section-head { display: grid; gap: 4px; margin-bottom: 10px; }
-.section-head.split { display: flex; justify-content: space-between; align-items: end; gap: 12px; }
+main {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 16px;
+  align-items: stretch;
+  padding: 12px 0 16px;
+}
+.inputs, .outputs {
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.section-head { display: grid; gap: 4px; margin-bottom: 10px; flex: none; }
+.section-head.split { display: flex; gap: 12px; }
+.inputs .section-head.split {
+  flex-direction: column;
+  align-items: stretch;
+}
+.inputs .section-head.split button { align-self: flex-start; }
 
 .sources, .slots { display: grid; gap: 12px; }
-.sources { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
-.slots { grid-template-columns: 1fr 1fr; }
+.sources {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  grid-template-columns: 1fr;
+  grid-auto-rows: max-content;
+  align-content: start;
+  padding-right: 4px;
+}
+.slots {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  grid-template-columns: 1fr 1fr;
+  align-content: start;
+}
 
 .card, .slot {
   background: var(--panel);
@@ -97,7 +134,7 @@ main { display: grid; gap: 22px; padding: 18px 0 32px; }
 
 .editor {
   display: grid;
-  grid-template-columns: 1.4fr 1fr 0.7fr auto;
+  grid-template-columns: 1fr;
   gap: 8px;
   align-items: end;
   margin-bottom: 12px;
@@ -105,6 +142,7 @@ main { display: grid; gap: 22px; padding: 18px 0 32px; }
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: 8px;
+  flex: none;
 }
 .editor-actions { display: flex; gap: 8px; }
 
@@ -176,6 +214,8 @@ button:disabled, select:disabled { opacity: 0.5; cursor: default; }
 }
 
 @media (max-width: 980px) {
-  .sources { grid-template-columns: 1fr 1fr; }
-  .slots, .controls, .editor { grid-template-columns: 1fr; }
+  body { height: auto; overflow: auto; }
+  main { grid-template-columns: 1fr; height: auto; }
+  .inputs { max-height: 52vh; }
+  .slots, .controls { grid-template-columns: 1fr; }
 }

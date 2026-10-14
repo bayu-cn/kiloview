@@ -1,55 +1,55 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Operator Kiloview</title>
+  <title>Kiloview Operator</title>
   <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
   <header>
     <div>
       <p class="eyebrow">Feeddesk</p>
-      <h1>Operator Kiloview</h1>
+      <h1>Kiloview Operator</h1>
     </div>
     <div class="who">
       <span id="user"></span>
-      <a id="logout" href="/logout" hidden>Keluar</a>
+      <a id="logout" href="/logout" hidden>Log out</a>
     </div>
   </header>
 
   <main>
-    <section>
+    <section class="inputs">
       <div class="section-head split">
         <div>
-          <h2>Sumber</h2>
-          <p>Seret nama sumber ke slot SDI. Nama tampilan dan port SRT bisa diubah. Sumber baru langsung didaftarkan ke MediaMTX.</p>
+          <h2>Inputs</h2>
+          <p>Drag a name onto an SDI slot. Display name and SRT port can be edited here.</p>
         </div>
-        <button type="button" id="add-source">Tambah sumber</button>
+        <button type="button" id="add-source">Add input</button>
       </div>
       <form id="source-form" class="editor" hidden>
-        <label>Nama tampilan
+        <label>Display name
           <input name="label" maxlength="48" required>
         </label>
-        <label>ID path
+        <label>Path ID
           <input name="id" maxlength="41" required>
         </label>
-        <label>Port SRT
+        <label>SRT port
           <input name="port" type="number" min="1024" max="65535" required>
         </label>
         <div class="editor-actions">
-          <button type="submit">Simpan</button>
-          <button type="button" id="delete-source" hidden>Hapus</button>
-          <button type="button" id="cancel-source">Batal</button>
+          <button type="submit">Save</button>
+          <button type="button" id="delete-source" hidden>Delete</button>
+          <button type="button" id="cancel-source">Cancel</button>
         </div>
       </form>
       <div id="sources" class="sources"></div>
     </section>
 
-    <section>
+    <section class="outputs">
       <div class="section-head">
-        <h2>Keluaran SDI</h2>
-        <p>Preview di slot ini memakai sumber dan peta audio yang sama dengan kabel SDI. Volume hanya untuk dengar di halaman ini.</p>
+        <h2>SDI outputs</h2>
+        <p>The preview uses the same source and audio map as the SDI cable. Volume is only for listening on this page.</p>
       </div>
       <div id="slots" class="slots"></div>
     </section>
