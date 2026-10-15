@@ -234,7 +234,8 @@ function shell() {
     <article class="slot" data-slot="${id}">
       <div class="slot-top">
         <h3>${slot.label}</h3>
-        <span class="meta">${slot.card || ("DeckLink " + slot.device)}</span>
+        <span class="lock-mark" data-lock-mark="${id}" hidden>Locked</span>
+        <button type="button" class="lock" data-lock="${id}">Lock</button>
       </div>
       <div class="preview">
         <video data-monitor="${id}" playsinline autoplay muted></video>
@@ -290,7 +291,9 @@ function shell() {
     const video = slot.querySelector("[data-monitor]");
     video.dataset.volume = String(savedVolume(id));
     video.volume = savedVolume(id);
+    const canDrop = () => state.admin || !state.slots[id].locked;
     slot.addEventListener("dragover", (event) => {
+      if (!canDrop()) return;
       event.preventDefault();
       slot.classList.add("over");
     });
@@ -298,10 +301,20 @@ function shell() {
       if (!slot.contains(event.relatedTarget)) slot.classList.remove("over");
     });
     slot.addEventListener("drop", (event) => {
+      if (!canDrop()) return;
       event.preventDefault();
       slot.classList.remove("over");
       const source = event.dataTransfer.getData("text/plain");
       if (source) save(id, { source });
+    });
+    slot.querySelector("[data-lock]").addEventListener("click", () => {
+      const locked = !state.slots[id].locked;
+      api(`/api/slots/${id}`, { method: "POST", body: JSON.stringify({ locked }) })
+        .then((next) => {
+          state = next;
+          paint();
+        })
+        .catch((error) => window.alert(error.message));
     });
     slot.querySelector("[data-mode]").addEventListener("change", (event) => {
       save(id, { mode: event.target.value });
@@ -354,12 +367,21 @@ function paint() {
 
   Object.entries(state.slots).forEach(([id, slot]) => {
     const box = slotsEl.querySelector(`[data-slot="${id}"]`);
+    const held = slot.locked && !state.admin;
     box.classList.toggle("playing", slot.status === "playing");
+    box.classList.toggle("locked", !!slot.locked);
     const assigned = box.querySelector("[data-assigned]");
     const hint = box.querySelector("[data-hint]");
     const named = state.sources.find((source) => source.id === slot.source);
     assigned.textContent = slot.source ? (state.admin ? slot.source : (named ? named.label : "Live")) : "Empty";
-    hint.textContent = slot.source ? "Drop another source to replace" : "Drop a source here";
+    hint.textContent = held
+      ? "Locked"
+      : (slot.source ? "Drop another source to replace" : "Drop a source here");
+    const lockBtn = box.querySelector("[data-lock]");
+    const lockMark = box.querySelector("[data-lock-mark]");
+    lockBtn.textContent = slot.locked ? "Unlock" : "Lock";
+    lockBtn.setAttribute("aria-pressed", slot.locked ? "true" : "false");
+    lockMark.hidden = !slot.locked;
     const status = box.querySelector("[data-status]");
     status.className = `status ${slot.status}`;
     status.textContent = statusText(slot);
@@ -368,9 +390,9 @@ function paint() {
     if (document.activeElement !== mode) mode.value = slot.mode;
     if (document.activeElement !== audio) audio.value = slot.audio;
     const busy = slot.status === "starting";
-    mode.disabled = busy;
-    audio.disabled = busy;
-    box.querySelector("[data-clear]").disabled = busy || !slot.source;
+    mode.disabled = busy || held;
+    audio.disabled = busy || held;
+    box.querySelector("[data-clear]").disabled = busy || held || !slot.source;
     const log = box.querySelector("[data-log]");
     const errorText = slot.error || "";
     log.hidden = slot.status !== "error" || !errorText;

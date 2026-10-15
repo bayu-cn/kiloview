@@ -198,7 +198,18 @@ body.is-operator [data-edit] {
 .slot.playing { border-color: #6d3030; }
 
 .slot-top, .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.slot-top h3 { margin-right: auto; }
 .slot h3 { margin: 0; font-size: 16px; }
+.lock { padding: 4px 10px; font-size: 12px; }
+.lock[aria-pressed="true"] { border-color: #d8d2c8; }
+.lock-mark {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+body.is-operator .lock { display: none; }
+.slot.locked .drop { border-style: solid; }
 .drop {
   min-height: 64px;
   border: 1px dashed #3a4050;

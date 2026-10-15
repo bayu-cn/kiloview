@@ -382,7 +382,12 @@ def load_state() -> dict:
             source = None
         mode = item.get("mode") if item.get("mode") in MODES else "1080i50"
         audio = item.get("audio") if item.get("audio") in AUDIO else "1-2"
-        slots[slot_id] = {"source": source, "mode": mode, "audio": audio}
+        slots[slot_id] = {
+            "source": source,
+            "mode": mode,
+            "audio": audio,
+            "locked": bool(item.get("locked")),
+        }
         runtime.setdefault(slot_id, {
             "proc": None,
             "preview": None,
@@ -402,7 +407,10 @@ state = {}
 
 
 def save_state() -> None:
-    payload = {slot_id: {key: slot[key] for key in ("source", "mode", "audio")} for slot_id, slot in state.items()}
+    payload = {
+        slot_id: {key: slot[key] for key in ("source", "mode", "audio", "locked")}
+        for slot_id, slot in state.items()
+    }
     tmp = STATE_PATH.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp.replace(STATE_PATH)
@@ -804,6 +812,7 @@ def snapshot() -> dict:
             "source": slot["source"],
             "mode": slot["mode"],
             "audio": slot["audio"],
+            "locked": bool(slot.get("locked")),
             "status": run["status"],
             "error": run["error"] if run["status"] == "error" else None,
             "whep": f"{web}/{slot_id}/whep" if slot["source"] else None,
@@ -1013,25 +1022,36 @@ def delete_source(source_id: str) -> None:
     mediamtx_call("DELETE", f"/v3/config/paths/delete/{quoted}")
 
 
-def apply_slot(slot_id: str, payload: dict) -> None:
+def apply_slot(slot_id: str, payload: dict, is_admin: bool = False) -> None:
     slot = state[slot_id]
+    if slot.get("locked") and not is_admin:
+        raise ValueError("This output is locked.")
+    if "locked" in payload:
+        if not is_admin:
+            raise ValueError("Only the IT group can lock an output.")
+        slot["locked"] = bool(payload["locked"])
+    routed = False
     if "source" in payload:
         source = payload["source"]
         if source is not None and source not in sources():
             raise ValueError("Unknown source.")
+        routed = routed or slot["source"] != source
         slot["source"] = source
     if "mode" in payload:
         if payload["mode"] not in MODES:
             raise ValueError("Unknown video mode.")
+        routed = routed or slot["mode"] != payload["mode"]
         slot["mode"] = payload["mode"]
     if "audio" in payload:
         if payload["audio"] not in AUDIO:
             raise ValueError("Unknown audio map.")
+        routed = routed or slot["audio"] != payload["audio"]
         slot["audio"] = payload["audio"]
-    runtime[slot_id]["restarts"] = 0
-    runtime[slot_id]["preview_restarts"] = 0
     save_state()
-    start_pipeline(slot_id)
+    if routed:
+        runtime[slot_id]["restarts"] = 0
+        runtime[slot_id]["preview_restarts"] = 0
+        start_pipeline(slot_id)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1130,7 +1150,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             with lock:
-                apply_slot(slot_id, payload)
+                apply_slot(slot_id, payload, bool(session.get("admin")))
         except ValueError as exc:
             self.send_json(400, {"error": str(exc)})
             return
