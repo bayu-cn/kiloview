@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html class="login-pf">
+<head>
+  <meta charset="utf-8">
+  <title>STREAM ROUTE login preview</title>
+  <link rel="stylesheet" href="https://unpkg.com/@patternfly/patternfly@4.224.2/patternfly.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
+  <link rel="stylesheet" href="resources/css/stream.css">
+  <style>
+    body { margin: 0; }
+    .preview-note {
+      max-width: 420px;
+      margin: 28px auto 0;
+      color: #9aa0ab;
+      font: 13px "Segoe UI", sans-serif;
+      text-align: center;
+    }
+    .login-pf-page { padding: 24px 16px 40px; }
+    .card-pf { max-width: 420px; margin: 0 auto; }
+    label { display: block; margin-bottom: 6px; }
+    .pf-c-form__group { margin-bottom: 14px; }
+    .pf-c-input-group { display: flex; }
+    .pf-c-input-group .pf-c-form-control { flex: 1; min-width: 0; }
+  </style>
+</head>
+<body class="login-pf">
+  <p class="preview-note">Local preview. This is the Keycloak password field with stream.css applied.</p>
+  <div class="login-pf-page">
+    <header id="kc-header">
+      <div id="kc-header-wrapper">kiloview</div>
+    </header>
+    <div class="card-pf">
+      <header class="login-pf-header">
+        <h1 id="kc-page-title">Sign in</h1>
+      </header>
+      <form id="kc-form-login" onsubmit="return false;">
+        <div class="pf-c-form__group">
+          <label for="username">Username</label>
+          <input tabindex="2" id="username" class="pf-c-form-control" name="username" type="text" autocomplete="username">
+        </div>
+        <div class="pf-c-form__group">
+          <label for="password">Password</label>
+          <div class="pf-c-input-group" dir="ltr">
+            <input tabindex="3" id="password" class="pf-c-form-control" name="password" type="password" autocomplete="current-password" value="secret">
+            <button class="pf-c-button pf-m-control" type="button" aria-label="Show password" aria-controls="password" data-password-toggle>
+              <i class="fa fa-eye" aria-hidden="true"></i>
+            </button>
+          </div>
+        </div>
+        <div id="kc-form-buttons">
+          <input id="kc-login" type="submit" value="Sign in">
+        </div>
+      </form>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,172 @@
+body,
+.login-pf body {
+  background: #101114;
+  color: #eceae6;
+  font-family: "Segoe UI", system-ui, sans-serif;
+}
+
+.login-pf {
+  background: #101114;
+}
+
+#kc-header {
+  margin-bottom: 18px;
+  text-align: center;
+}
+
+#kc-header-wrapper {
+  padding: 0;
+  color: #eceae6;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  background-image: none;
+  white-space: normal;
+}
+
+#kc-header-wrapper::before {
+  content: "STREAM";
+  display: block;
+  margin-bottom: 4px;
+  color: #9aa0ab;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.login-pf-page .card-pf {
+  background: #181b22;
+  border: 1px solid #2c313c;
+  border-radius: 8px;
+  box-shadow: none;
+  padding: 22px 22px 18px;
+}
+
+.login-pf-page .login-pf-header {
+  margin-bottom: 16px;
+}
+
+.login-pf-page .login-pf-header h1,
+#kc-page-title {
+  margin: 0;
+  color: #eceae6;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.login-pf-page label,
+.login-pf-page .pf-c-form__label,
+.login-pf-page .pf-c-form__label-text {
+  color: #9aa0ab;
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.login-pf-page .form-control,
+.login-pf-page .pf-c-form-control,
+.login-pf-page input[type="text"],
+.login-pf-page input[type="password"] {
+  background: #20242e;
+  border: 1px solid #2c313c;
+  border-radius: 6px;
+  color: #eceae6;
+  box-shadow: none;
+  height: auto;
+  padding: 8px 10px;
+  color-scheme: dark;
+}
+
+.login-pf-page input[type="password"]::-ms-reveal,
+.login-pf-page input[type="password"]::-ms-clear {
+  background-color: #20242e;
+  filter: invert(1);
+}
+
+.login-pf-page .form-control:focus,
+.login-pf-page .pf-c-form-control:focus,
+.login-pf-page input:focus {
+  border-color: #d8d2c8;
+  box-shadow: none;
+  background: #20242e;
+  color: #eceae6;
+}
+
+.pf-c-input-group {
+  --pf-c-input-group--BackgroundColor: #20242e;
+  background-color: #20242e !important;
+}
+
+button.stream-eye {
+  --pf-c-button--m-control--BackgroundColor: #20242e;
+  --pf-c-button--m-control--hover--BackgroundColor: #2c313c;
+  background: #20242e !important;
+  background-color: #20242e !important;
+  color: #eceae6 !important;
+  border: 1px solid #2c313c !important;
+  border-left: 0 !important;
+  border-radius: 0 6px 6px 0 !important;
+  box-shadow: none !important;
+  padding: 0 12px;
+}
+
+button.stream-eye:hover,
+button.stream-eye:focus {
+  background: #2c313c !important;
+  color: #eceae6 !important;
+}
+
+button.stream-eye i {
+  color: #eceae6 !important;
+}
+
+#kc-form-login button,
+.pf-c-input-group button,
+button[data-password-toggle] {
+  --pf-c-button--m-control--BackgroundColor: #20242e;
+  --pf-c-button--m-control--hover--BackgroundColor: #2c313c;
+  background: #20242e !important;
+  background-color: #20242e !important;
+  color: #eceae6 !important;
+  border-color: #2c313c !important;
+  box-shadow: none !important;
+}
+
+#kc-form-buttons {
+  margin-top: 16px;
+}
+
+#kc-login,
+.login-pf-page input[type="submit"] {
+  background: #20242e;
+  border: 1px solid #2c313c;
+  border-radius: 6px;
+  color: #eceae6;
+  font-weight: 600;
+  text-transform: none;
+}
+
+#kc-login:hover,
+#kc-login:focus,
+.login-pf-page input[type="submit"]:hover {
+  background: #2c313c;
+  border-color: #d8d2c8;
+  color: #eceae6;
+}
+
+.login-pf-page a {
+  color: #eceae6;
+}
+
+.alert-error,
+.pf-m-danger {
+  background: #24181a;
+  border-color: #6d3030;
+  color: #e0b4b4;
+}
+
+#kc-locale,
+#kc-info-wrapper {
+  color: #9aa0ab;
+}
