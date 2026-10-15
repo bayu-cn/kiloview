@@ -551,7 +551,14 @@ def read_log(slot_id: str, suffix: str = "", limit: int = 40) -> str:
     return "\n".join(lines[-limit:])
 
 
+def signal_lost(text: str) -> bool:
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in ("404", "not found", "no such stream", "end-of-file", "end of file"))
+
+
 def explain_sdi_error(text: str, device: int) -> str:
+    if signal_lost(text):
+        return text
     if "Failed to start" in text or "doesn't want to preroll" in text:
         return (
             "This card did not start. Check the config IDs: SDI 1 and SDI 2 must be two different cards.\n"
@@ -627,6 +634,14 @@ def mark_playing(slot_id: str, generation: int, proc: subprocess.Popen) -> None:
             run["restarts"] = 0
 
 
+def clear_routed_slot(slot_id: str) -> None:
+    if not state[slot_id]["source"]:
+        return
+    state[slot_id]["source"] = None
+    save_state()
+    start_pipeline(slot_id)
+
+
 def watch_pipeline(slot_id: str, generation: int, proc: subprocess.Popen) -> None:
     proc.wait()
     with lock:
@@ -634,6 +649,9 @@ def watch_pipeline(slot_id: str, generation: int, proc: subprocess.Popen) -> Non
         if run["generation"] != generation or run["proc"] is not proc:
             return
         run["proc"] = None
+        if signal_lost(read_log(slot_id)):
+            clear_routed_slot(slot_id)
+            return
         if state[slot_id]["source"] and run["restarts"] < 3:
             run["restarts"] += 1
             run["status"] = "starting"
@@ -704,6 +722,10 @@ def watch_preview(slot_id: str, generation: int, proc: subprocess.Popen) -> None
         if run.get("preview_generation") != generation or run.get("preview") is not proc:
             return
         run["preview"] = None
+        if signal_lost(read_log(slot_id, "-preview")):
+            run["preview_error"] = None
+            clear_routed_slot(slot_id)
+            return
         if state[slot_id]["source"] and run.get("preview_restarts", 0) < 3:
             run["preview_restarts"] = run.get("preview_restarts", 0) + 1
             threading.Thread(target=restart_preview_later, args=(slot_id, generation), daemon=True).start()
@@ -744,18 +766,31 @@ def webrtc_base() -> str:
     return public.replace(":8888", ":8889").rstrip("/")
 
 
-def path_ready() -> dict[str, bool]:
+def path_ready() -> dict[str, bool] | None:
     url = cfg("MEDIAMTX_API", "http://127.0.0.1:9997").rstrip("/") + "/v3/paths/list"
     try:
         with urllib.request.urlopen(url, timeout=1.5) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, json.JSONDecodeError, TimeoutError):
-        return {}
+        return None
     items = payload.get("items", payload if isinstance(payload, list) else [])
     return {item.get("name"): bool(item.get("ready")) for item in items if isinstance(item, dict)}
 
 
+def release_lost_signals(ready: dict[str, bool] | None) -> None:
+    if ready is None:
+        return
+    with lock:
+        for slot_id, slot in state.items():
+            source = slot["source"]
+            if source and not ready.get(source):
+                clear_routed_slot(slot_id)
+
+
 def snapshot() -> dict:
+    ready = path_ready()
+    release_lost_signals(ready)
+    ready = ready or {}
     with lock:
         slots_copy = {slot_id: dict(slot) for slot_id, slot in state.items()}
         runs_copy = {}
