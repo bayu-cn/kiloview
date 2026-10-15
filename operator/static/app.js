@@ -199,6 +199,7 @@ function badge(source) {
 function statusText(slot) {
   if (slot.status === "playing") return "On air";
   if (slot.status === "starting") return "Locking...";
+  if (slot.status === "waiting") return "No signal";
   if (slot.status === "error") return "SDI output failed";
   return "Empty";
 }

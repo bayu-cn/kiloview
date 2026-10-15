@@ -616,7 +616,7 @@ def start_pipeline(slot_id: str) -> None:
         return
     log.close()
     run["proc"] = proc
-    run["status"] = "starting"
+    run["status"] = "waiting" if run["status"] == "waiting" else "starting"
     run["error"] = None
     threading.Thread(target=watch_pipeline, args=(slot_id, generation, proc), daemon=True).start()
     threading.Thread(target=mark_playing, args=(slot_id, generation, proc), daemon=True).start()
@@ -629,17 +629,9 @@ def mark_playing(slot_id: str, generation: int, proc: subprocess.Popen) -> None:
         run = runtime[slot_id]
         if run["generation"] != generation or run["proc"] is not proc:
             return
-        if proc.poll() is None and run["status"] == "starting":
+        if proc.poll() is None and run["status"] in {"starting", "waiting"}:
             run["status"] = "playing"
             run["restarts"] = 0
-
-
-def clear_routed_slot(slot_id: str) -> None:
-    if not state[slot_id]["source"]:
-        return
-    state[slot_id]["source"] = None
-    save_state()
-    start_pipeline(slot_id)
 
 
 def watch_pipeline(slot_id: str, generation: int, proc: subprocess.Popen) -> None:
@@ -649,8 +641,12 @@ def watch_pipeline(slot_id: str, generation: int, proc: subprocess.Popen) -> Non
         if run["generation"] != generation or run["proc"] is not proc:
             return
         run["proc"] = None
-        if signal_lost(read_log(slot_id)):
-            clear_routed_slot(slot_id)
+        if state[slot_id]["source"] and signal_lost(read_log(slot_id)):
+            run["status"] = "waiting"
+            run["error"] = None
+            run["preview_error"] = None
+            run["restarts"] = 0
+            threading.Thread(target=restart_later, args=(slot_id, generation), daemon=True).start()
             return
         if state[slot_id]["source"] and run["restarts"] < 3:
             run["restarts"] += 1
@@ -722,9 +718,9 @@ def watch_preview(slot_id: str, generation: int, proc: subprocess.Popen) -> None
         if run.get("preview_generation") != generation or run.get("preview") is not proc:
             return
         run["preview"] = None
-        if signal_lost(read_log(slot_id, "-preview")):
+        if state[slot_id]["source"] and signal_lost(read_log(slot_id, "-preview")):
             run["preview_error"] = None
-            clear_routed_slot(slot_id)
+            threading.Thread(target=restart_preview_later, args=(slot_id, generation), daemon=True).start()
             return
         if state[slot_id]["source"] and run.get("preview_restarts", 0) < 3:
             run["preview_restarts"] = run.get("preview_restarts", 0) + 1
@@ -777,20 +773,8 @@ def path_ready() -> dict[str, bool] | None:
     return {item.get("name"): bool(item.get("ready")) for item in items if isinstance(item, dict)}
 
 
-def release_lost_signals(ready: dict[str, bool] | None) -> None:
-    if ready is None:
-        return
-    with lock:
-        for slot_id, slot in state.items():
-            source = slot["source"]
-            if source and not ready.get(source):
-                clear_routed_slot(slot_id)
-
-
 def snapshot() -> dict:
-    ready = path_ready()
-    release_lost_signals(ready)
-    ready = ready or {}
+    ready = path_ready() or {}
     with lock:
         slots_copy = {slot_id: dict(slot) for slot_id, slot in state.items()}
         runs_copy = {}
@@ -804,7 +788,6 @@ def snapshot() -> dict:
                 "error": run["error"],
                 "preview_error": run.get("preview_error"),
             }
-    ready = path_ready()
     web = webrtc_base()
     routed: dict[str, list[str]] = {}
     slots_out = {}
