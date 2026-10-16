@@ -15,6 +15,9 @@ const userEl = document.querySelector("#user");
 const logoutEl = document.querySelector("#logout");
 const sourceForm = document.querySelector("#source-form");
 const addSourceButton = document.querySelector("#add-source");
+const outputForm = document.querySelector("#output-form");
+const addOutputButton = document.querySelector("#add-output");
+const outputNote = document.querySelector("#output-note");
 
 let state = null;
 const players = new Map();
@@ -236,6 +239,7 @@ function shell() {
         <h3>${slot.label}</h3>
         <span class="lock-mark" data-lock-mark="${id}" hidden>Locked</span>
         <button type="button" class="lock" data-lock="${id}">Lock</button>
+        <button type="button" class="remove-output" data-remove="${id}">Remove</button>
       </div>
       <div class="preview">
         <video data-monitor="${id}" playsinline autoplay muted></video>
@@ -325,6 +329,12 @@ function shell() {
     slot.querySelector("[data-clear]").addEventListener("click", () => {
       save(id, { source: null });
     });
+    slot.querySelector("[data-remove]").addEventListener("click", () => {
+      if (!window.confirm(`Remove ${state.slots[id].label}?`)) return;
+      api(`/api/outputs/${encodeURIComponent(id)}/delete`, { method: "POST", body: "{}" })
+        .then((next) => applyOutputResponse(next))
+        .catch((error) => window.alert(error.message));
+    });
     slot.querySelector("[data-hear]").addEventListener("click", (event) => {
       const hearing = video.dataset.heard === "1";
       video.dataset.heard = hearing ? "0" : "1";
@@ -403,6 +413,7 @@ function paint() {
     mode.disabled = busy || held;
     audio.disabled = busy || held;
     box.querySelector("[data-clear]").disabled = busy || held || !slot.source;
+    box.querySelector("[data-remove]").disabled = !!slot.source;
     const log = box.querySelector("[data-log]");
     const errorText = slot.error || "";
     log.hidden = slot.status !== "error" || !errorText;
@@ -442,25 +453,29 @@ function accountLabel(next) {
 function applyRole() {
   document.body.classList.toggle("is-operator", !state.admin);
   addSourceButton.hidden = !state.admin;
+  addOutputButton.hidden = !state.admin;
   const note = document.querySelector("#inputs-note");
   note.textContent = state.admin
     ? "Drag a name onto an SDI slot. Caller and listener inputs can be edited here."
     : "Drag a preview onto an SDI slot.";
-  if (!state.admin) closeEditor();
+  if (!state.admin) {
+    closeEditor();
+    closeOutputEditor();
+  }
 }
 
 async function tick() {
   try {
     const next = await api("/api/state");
     if (!next) return;
-    const sourceKey = next.sources.map((source) => source.id).join(",");
+    const changed = !state || layoutKey(state) !== layoutKey(next);
     if (!state) {
       state = next;
       userEl.textContent = accountLabel(next);
       logoutEl.hidden = !next.auth;
       applyRole();
       shell();
-    } else if (state.sources.map((source) => source.id).join(",") !== sourceKey || state.admin !== next.admin) {
+    } else if (changed) {
       state = next;
       applyRole();
       shell();
@@ -521,6 +536,71 @@ function closeEditor() {
   sourceForm.dataset.editing = "";
 }
 
+function layoutKey(body) {
+  return [
+    body.admin ? "1" : "0",
+    body.sources.map((source) => source.id).join(","),
+    Object.keys(body.slots).join(","),
+  ].join("|");
+}
+
+function closeOutputEditor() {
+  outputForm.hidden = true;
+}
+
+function nextOutputLabel() {
+  const used = new Set(Object.values(state.slots).map((slot) => slot.label));
+  let number = 1;
+  while (used.has(`SDI ${number}`)) number += 1;
+  return `SDI ${number}`;
+}
+
+async function openOutputEditor() {
+  outputForm.hidden = false;
+  outputForm.elements.label.value = nextOutputLabel();
+  const select = outputForm.elements.persistentId;
+  select.innerHTML = "";
+  select.disabled = true;
+  outputNote.textContent = "Checking DeckLink cards...";
+  try {
+    const data = await api("/api/decklink");
+    if (!data) return;
+    const devices = data.devices || [];
+    devices.forEach((device) => {
+      const option = document.createElement("option");
+      option.value = String(device.persistentId);
+      option.disabled = !!device.used;
+      option.textContent = device.used
+        ? `${device.name} (${device.card}) — used by ${device.usedBy}`
+        : `${device.name} (${device.card})`;
+      select.appendChild(option);
+    });
+    const free = devices.find((device) => !device.used);
+    select.disabled = !free;
+    if (free) select.value = String(free.persistentId);
+    outputNote.textContent = devices.length
+      ? (free
+        ? "Cards already assigned stay in the list and cannot be selected."
+        : "Every detected card is already assigned.")
+      : (data.error || "No DeckLink playback card was reported.");
+  } catch (error) {
+    outputNote.textContent = error.message;
+  }
+}
+
+async function applyOutputResponse(next) {
+  if (!next) return;
+  if (next.warning) window.alert(next.warning);
+  const changed = !state || layoutKey(state) !== layoutKey(next);
+  state = next;
+  if (changed) {
+    applyRole();
+    shell();
+  }
+  paint();
+  closeOutputEditor();
+}
+
 async function applySourceResponse(next) {
   if (!next) return;
   if (next.warning) window.alert(next.warning);
@@ -560,6 +640,28 @@ sourceForm.addEventListener("submit", async (event) => {
   try {
     const next = await api(path, { method: "POST", body: JSON.stringify(body) });
     await applySourceResponse(next);
+  } catch (error) {
+    window.alert(error.message);
+  }
+});
+addOutputButton.addEventListener("click", () => openOutputEditor());
+document.querySelector("#cancel-output").addEventListener("click", closeOutputEditor);
+outputForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const selected = outputForm.elements.persistentId.selectedOptions[0];
+  if (!selected || selected.disabled) {
+    window.alert("Choose a DeckLink card that is not already assigned.");
+    return;
+  }
+  try {
+    const next = await api("/api/outputs", {
+      method: "POST",
+      body: JSON.stringify({
+        label: outputForm.elements.label.value.trim(),
+        persistentId: Number(selected.value),
+      }),
+    });
+    await applyOutputResponse(next);
   } catch (error) {
     window.alert(error.message);
   }

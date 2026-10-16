@@ -88,6 +88,63 @@ def parse_persistent_id(raw: str) -> int | None:
         return None
 
 
+def outputs_path() -> Path:
+    return STATE_PATH.parent / "outputs.json"
+
+
+def save_outputs() -> None:
+    payload = []
+    for slot_id, meta in SLOTS.items():
+        item = {"id": slot_id, "label": meta["label"], "device": meta["device"]}
+        if meta.get("persistent_id") is not None:
+            item["persistentId"] = meta["persistent_id"]
+        payload.append(item)
+    path = outputs_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def load_outputs() -> None:
+    path = outputs_path()
+    if not path.exists():
+        save_outputs()
+        return
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return
+    if not isinstance(raw, list):
+        return
+    loaded = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        slot_id = str(item.get("id") or "")
+        if not re.fullmatch(r"sdi\d+", slot_id):
+            continue
+        label = str(item.get("label") or slot_id).strip() or slot_id
+        if len(label) > 48:
+            label = label[:48]
+        try:
+            device = int(item.get("device") or 0)
+        except (TypeError, ValueError):
+            device = 0
+        meta = {"label": label, "device": device}
+        raw_id = item.get("persistentId")
+        if isinstance(raw_id, int):
+            meta["persistent_id"] = raw_id
+        elif isinstance(raw_id, str):
+            parsed = parse_persistent_id(raw_id)
+            if parsed is not None:
+                meta["persistent_id"] = parsed
+        loaded[slot_id] = meta
+    if loaded:
+        SLOTS.clear()
+        SLOTS.update(loaded)
+
+
 def sink_device_args(slot_id: str) -> list[str]:
     persistent = SLOTS[slot_id].get("persistent_id")
     if persistent is not None:
@@ -194,7 +251,7 @@ def source_identity(item: dict) -> tuple[str, str] | None:
     label = str(item.get("label") or source_id).strip()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,40}", source_id):
         return None
-    if source_id in SLOTS or source_id.lower() in {"sdi1", "sdi2"}:
+    if source_id in SLOTS or re.fullmatch(r"sdi\d+", source_id.lower()):
         return None
     if not label or len(label) > 48:
         return None
@@ -253,7 +310,7 @@ def parse_mediamtx_sources() -> list[dict]:
             continue
         if re.match(r"^  [^ #\s].*:$", line):
             name = line.strip()[:-1]
-            current = None if name in SLOTS else {"id": name, "label": name}
+            current = None if name in SLOTS or re.fullmatch(r"sdi\d+", name) else {"id": name, "label": name}
             if current:
                 found.append(current)
             continue
@@ -315,15 +372,13 @@ def write_mediamtx() -> None:
             "    sourceOnDemand: false",
             "",
         ])
-    lines.extend([
-        "  # Preview operator. Diisi GStreamer, bukan SRT.",
-        "  sdi1:",
-        "    source: publisher",
-        "",
-        "  sdi2:",
-        "    source: publisher",
-        "",
-    ])
+    lines.append("  # Preview operator. Diisi GStreamer, bukan SRT.")
+    for slot_id in SLOTS:
+        lines.extend([
+            f"  {slot_id}:",
+            "    source: publisher",
+            "",
+        ])
     path.write_text(head + "\n" + "\n".join(lines), encoding="utf-8")
 
 
@@ -365,6 +420,195 @@ def publish_source(item: dict, replace: bool = True) -> str | None:
 def ensure_sources() -> None:
     for item in catalog:
         publish_source(item, replace=False)
+
+
+def publish_output(slot_id: str) -> str | None:
+    quoted = urllib.parse.quote(slot_id, safe="")
+    payload = {"source": "publisher", "sourceOnDemand": False}
+    code, detail = mediamtx_call("POST", f"/v3/config/paths/add/{quoted}", payload)
+    if code in (200, 201, 204) or "exist" in detail.lower():
+        return None
+    return f"MediaMTX did not accept {slot_id}: {detail or code}"
+
+
+def ensure_outputs() -> None:
+    for slot_id in SLOTS:
+        publish_output(slot_id)
+
+
+def prop_int(value: str) -> int | None:
+    cleaned = re.sub(r"^\([^)]*\)", "", value.strip())
+    match = re.search(r"\d+", cleaned)
+    if not match:
+        return None
+    return int(match.group())
+
+
+def card_label(persistent: int) -> str:
+    return f"P{persistent:08x}"
+
+
+def parse_decklink_monitor(text: str) -> list[dict]:
+    found = []
+    current: dict | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("Device found"):
+            if current:
+                found.append(current)
+            current = {}
+            continue
+        if current is None or not line or line == "properties:":
+            continue
+        if " : " in line:
+            key, value = line.split(" : ", 1)
+        elif " = " in line:
+            key, value = line.split(" = ", 1)
+        else:
+            continue
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "name" and "name" not in current:
+            current["name"] = value
+        elif key == "class":
+            current["class"] = value
+        elif key == "model-name":
+            current["model"] = value
+        elif key == "persistent-id":
+            parsed = prop_int(value)
+            if parsed is not None:
+                current["persistent_id"] = parsed
+        elif key == "device-number":
+            parsed = prop_int(value)
+            if parsed is not None:
+                current["device"] = parsed
+    if current:
+        found.append(current)
+    devices = []
+    seen = set()
+    for item in found:
+        kind = str(item.get("class") or "").lower()
+        persistent = item.get("persistent_id")
+        if persistent is None or persistent in seen:
+            continue
+        if "video" not in kind or "sink" not in kind:
+            continue
+        seen.add(persistent)
+        devices.append({
+            "name": item.get("model") or item.get("name") or "DeckLink",
+            "persistent_id": persistent,
+            "device": int(item.get("device") or 0),
+        })
+    return devices
+
+
+def device_monitor_path() -> Path | None:
+    launch = Path(cfg("GST_LAUNCH", "gst-launch-1.0"))
+    candidate = launch.parent / "gst-device-monitor-1.0"
+    if candidate.is_file():
+        return candidate
+    return None
+
+
+def scan_decklink() -> tuple[list[dict], str | None]:
+    binary = device_monitor_path()
+    if binary is None:
+        return [], "DeckLink detection needs the host GStreamer tools."
+    proc = subprocess.Popen(
+        [str(binary)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        start_new_session=os.name == "posix",
+    )
+    try:
+        text, _ = proc.communicate(timeout=3)
+    except subprocess.TimeoutExpired:
+        kill_process(proc)
+        text, _ = proc.communicate(timeout=2)
+    devices = parse_decklink_monitor(text or "")
+    if not devices:
+        return [], "No DeckLink playback card was reported. Check the Blackmagic driver on this server."
+    return devices, None
+
+
+def next_slot_id() -> str:
+    number = 1
+    while f"sdi{number}" in SLOTS:
+        number += 1
+    return f"sdi{number}"
+
+
+def fresh_runtime(has_source: bool = False) -> dict:
+    return {
+        "proc": None,
+        "preview": None,
+        "preview_generation": 0,
+        "preview_restarts": 0,
+        "preview_error": None,
+        "generation": 0,
+        "restarts": 0,
+        "status": "starting" if has_source else "empty",
+        "error": None,
+    }
+
+
+def add_output(payload: dict) -> str | None:
+    label = str(payload.get("label") or "").strip()
+    if not label or len(label) > 48:
+        raise ValueError("Output name is invalid.")
+    try:
+        persistent = int(payload.get("persistentId"))
+    except (TypeError, ValueError):
+        raise ValueError("Choose a DeckLink card.")
+    devices, scan_error = scan_decklink()
+    match = next((item for item in devices if item["persistent_id"] == persistent), None)
+    if match is None:
+        raise ValueError(scan_error or "That card is not available.")
+    with lock:
+        for meta in SLOTS.values():
+            if meta.get("persistent_id") == persistent:
+                raise ValueError("That card is already assigned.")
+        slot_id = next_slot_id()
+        SLOTS[slot_id] = {
+            "label": label,
+            "device": int(match.get("device") or 0),
+            "persistent_id": persistent,
+        }
+        save_outputs()
+        state[slot_id] = {"source": None, "mode": "1080i50", "audio": "1-2", "locked": False}
+        runtime[slot_id] = fresh_runtime(False)
+        save_state()
+    write_mediamtx()
+    return publish_output(slot_id)
+
+
+def delete_output(slot_id: str) -> None:
+    with lock:
+        if slot_id not in SLOTS:
+            raise ValueError("Unknown SDI output.")
+        if state.get(slot_id, {}).get("source"):
+            raise ValueError("Clear this output before removing it.")
+        run = runtime.get(slot_id)
+        if run:
+            run["generation"] = run.get("generation", 0) + 1
+            run["preview_generation"] = run.get("preview_generation", 0) + 1
+            proc = run.get("proc")
+            preview = run.get("preview")
+            run["proc"] = None
+            run["preview"] = None
+            if proc is not None and proc.poll() is None:
+                kill_process(proc)
+            if preview is not None and preview.poll() is None:
+                kill_process(preview)
+        SLOTS.pop(slot_id, None)
+        state.pop(slot_id, None)
+        runtime.pop(slot_id, None)
+        save_outputs()
+        save_state()
+    write_mediamtx()
+    quoted = urllib.parse.quote(slot_id, safe="")
+    mediamtx_call("DELETE", f"/v3/config/paths/delete/{quoted}")
 
 
 def stop_listener(source_id: str) -> None:
@@ -554,17 +798,7 @@ def load_state() -> dict:
             "audio": audio,
             "locked": bool(item.get("locked")),
         }
-        runtime.setdefault(slot_id, {
-            "proc": None,
-            "preview": None,
-            "preview_generation": 0,
-            "preview_restarts": 0,
-            "preview_error": None,
-            "generation": 0,
-            "restarts": 0,
-            "status": "empty" if source is None else "starting",
-            "error": None,
-        })
+        runtime.setdefault(slot_id, fresh_runtime(source is not None))
     return slots
 
 
@@ -976,7 +1210,7 @@ def snapshot() -> dict:
         slots_out[slot_id] = {
             "label": meta["label"],
             "device": meta["device"],
-            "card": f"P{pid:08x}" if pid else f"device {meta['device']}",
+            "card": card_label(pid) if pid else f"device {meta['device']}",
             "source": slot["source"],
             "mode": slot["mode"],
             "audio": slot["audio"],
@@ -1298,12 +1532,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             self.handle_state()
             return
+        if path == "/api/decklink":
+            self.handle_decklink()
+            return
         self.send_json(404, {"error": "Not found."})
 
     def do_POST(self) -> None:
         path = urllib.parse.urlsplit(self.path).path
         if path == "/api/sources" or path.startswith("/api/sources/"):
             self.handle_source(path)
+            return
+        if path == "/api/outputs" or path.startswith("/api/outputs/"):
+            self.handle_output(path)
             return
         prefix = "/api/slots/"
         if not path.startswith(prefix):
@@ -1383,6 +1623,64 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(401, {"error": "Login required."})
             return
         self.send_json(200, with_session(snapshot(), session))
+
+    def handle_decklink(self) -> None:
+        session = current_session(self)
+        if session is None:
+            self.send_json(401, {"error": "Login required."})
+            return
+        if not session.get("admin"):
+            self.send_json(403, {"error": "Only the IT group can add outputs."})
+            return
+        devices, error = scan_decklink()
+        used = {
+            meta["persistent_id"]: meta["label"]
+            for meta in SLOTS.values()
+            if meta.get("persistent_id") is not None
+        }
+        self.send_json(200, {
+            "devices": [
+                {
+                    "name": item["name"],
+                    "persistentId": item["persistent_id"],
+                    "card": card_label(item["persistent_id"]),
+                    "device": item["device"],
+                    "used": item["persistent_id"] in used,
+                    "usedBy": used.get(item["persistent_id"]),
+                }
+                for item in devices
+            ],
+            "error": error,
+        })
+
+    def handle_output(self, path: str) -> None:
+        session = current_session(self)
+        if session is None:
+            self.send_json(401, {"error": "Login required."})
+            return
+        if not session.get("admin"):
+            self.send_json(403, {"error": "Only the IT group can add outputs."})
+            return
+        try:
+            if path.endswith("/delete"):
+                slot_id = urllib.parse.unquote(path[len("/api/outputs/"):-len("/delete")])
+                delete_output(slot_id)
+                warning = None
+            elif path == "/api/outputs":
+                warning = add_output(self.read_json())
+            else:
+                self.send_json(404, {"error": "Not found."})
+                return
+        except ValueError as exc:
+            self.send_json(400, {"error": str(exc)})
+            return
+        except OSError as exc:
+            self.send_json(500, {"error": f"Could not save the output: {exc}"})
+            return
+        body = with_session(snapshot(), session)
+        if warning:
+            body["warning"] = warning
+        self.send_json(200, body)
 
     def handle_login(self) -> None:
         if not auth_enabled():
@@ -1501,12 +1799,14 @@ def main() -> None:
     global state
     load_env_file()
     apply_paths()
+    load_outputs()
     load_catalog()
     try:
         write_mediamtx()
     except OSError as exc:
         print(f"MediaMTX config tidak tertulis: {exc}", flush=True)
     ensure_sources()
+    ensure_outputs()
     with lock:
         for item in catalog:
             if item.get("mode") == "listener":

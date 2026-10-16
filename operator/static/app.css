@@ -73,7 +73,10 @@ main {
   flex-direction: column;
   align-items: stretch;
 }
-.inputs .section-head.split button { align-self: flex-start; }
+.inputs .section-head.split button,
+.outputs .section-head.split button { align-self: flex-start; }
+.outputs .section-head.split { align-items: flex-start; justify-content: space-between; }
+.outputs .section-head.split > div { flex: 1; min-width: 0; }
 
 .sources, .slots { display: grid; gap: 12px; }
 .sources {
@@ -151,6 +154,7 @@ main {
 }
 .field-note {
   display: block;
+  margin: 0;
   margin-top: 4px;
   color: var(--muted);
   font-size: 12px;
@@ -173,6 +177,8 @@ main {
 .editor[hidden],
 body.is-operator .editor,
 body.is-operator #add-source,
+body.is-operator #add-output,
+body.is-operator .remove-output,
 body.is-operator .card-drag .name,
 body.is-operator .card-drag .hint,
 body.is-operator [data-edit] {

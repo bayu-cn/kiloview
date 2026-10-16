@@ -57,10 +57,26 @@
     </section>
 
     <section class="outputs">
-      <div class="section-head">
-        <h2>SDI outputs</h2>
-        <p>The preview uses the same source and audio map as the SDI cable. Volume is only for listening on this page.</p>
+      <div class="section-head split">
+        <div>
+          <h2>SDI outputs</h2>
+          <p>The preview uses the same source and audio map as the SDI cable. Volume is only for listening on this page.</p>
+        </div>
+        <button type="button" id="add-output" hidden>Add output</button>
       </div>
+      <form id="output-form" class="editor" hidden>
+        <label>Display name
+          <input name="label" maxlength="48" required>
+        </label>
+        <label>DeckLink card
+          <select name="persistentId" required></select>
+        </label>
+        <p class="field-note" id="output-note"></p>
+        <div class="editor-actions">
+          <button type="submit">Save</button>
+          <button type="button" id="cancel-output">Cancel</button>
+        </div>
+      </form>
       <div id="slots" class="slots"></div>
     </section>
   </main>
