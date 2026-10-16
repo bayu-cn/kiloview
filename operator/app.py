@@ -627,18 +627,21 @@ def listener_args(item: dict) -> list[str] | None:
     binary = "/usr/bin/ffmpeg"
     if not Path(binary).is_file():
         return None
-    base = cfg("RTSP_BASE", "rtsp://127.0.0.1:8554").rstrip("/")
     port = int(item["port"])
+    # vMix mengirim MPEG-TS. Disalin ke RTSP, SPS/PPS hilang dan MediaMTX
+    # tetap "stream not found". Teruskan TS asli ke server SRT MediaMTX.
+    target = cfg("MEDIAMTX_SRT", "srt://127.0.0.1:8890").rstrip("/")
+    publish = f"{target}?streamid=publish:{item['id']}&pkt_size=1316"
     return [
         "nice", "-n", "12",
         binary, "-nostdin", "-hide_banner", "-loglevel", "warning",
+        "-fflags", "nobuffer",
+        "-analyzeduration", "2000000",
+        "-probesize", "2000000",
         "-i", f"srt://0.0.0.0:{port}?mode=listener&transtype=live&latency=120000",
         "-c", "copy",
-        "-muxdelay", "0",
-        "-muxpreload", "0",
-        "-f", "rtsp",
-        "-rtsp_transport", "tcp",
-        f"{base}/{item['id']}",
+        "-f", "mpegts",
+        publish,
     ]
 
 
