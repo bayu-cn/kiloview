@@ -34,8 +34,18 @@
         <label>Path ID
           <input name="id" maxlength="41" required>
         </label>
-        <label>Source URL
+        <label>Connection
+          <select name="mode">
+            <option value="caller">Caller — this server calls the remote</option>
+            <option value="listener">Listener — wait on a port you choose</option>
+          </select>
+        </label>
+        <label data-field="url">Remote URL
           <input name="url" type="text" maxlength="300" spellcheck="false" autocomplete="off" placeholder="srt://127.0.0.1:3001?mode=listener" required>
+        </label>
+        <label data-field="port" hidden>Listen port
+          <input name="port" type="number" min="1024" max="65535" inputmode="numeric">
+          <span class="field-note">The sender calls this server on that UDP port, for example srt://172.17.20.34:9101. Other live inputs stay up.</span>
         </label>
         <div class="editor-actions">
           <button type="submit">Save</button>

@@ -362,7 +362,17 @@ function paint() {
     const label = card.querySelector("[data-label]");
     if (label) label.textContent = source.label;
     const url = card.querySelector("[data-url]");
-    if (url) url.textContent = source.url;
+    if (url) {
+      if (source.mode === "listener") {
+        url.textContent = source.ingestError
+          ? `UDP ${source.port} — ${source.ingestError}`
+          : `Listening on UDP ${source.port}`;
+        url.classList.toggle("bad", Boolean(source.ingestError));
+      } else {
+        url.textContent = source.url;
+        url.classList.remove("bad");
+      }
+    }
   });
 
   Object.entries(state.slots).forEach(([id, slot]) => {
@@ -434,7 +444,7 @@ function applyRole() {
   addSourceButton.hidden = !state.admin;
   const note = document.querySelector("#inputs-note");
   note.textContent = state.admin
-    ? "Drag a name onto an SDI slot. Display name and source URL can be edited here."
+    ? "Drag a name onto an SDI slot. Caller and listener inputs can be edited here."
     : "Drag a preview onto an SDI slot.";
   if (!state.admin) closeEditor();
 }
@@ -475,12 +485,32 @@ function nextUrl() {
   return url;
 }
 
+function nextListenPort() {
+  const used = new Set(
+    state.sources.filter((source) => source.mode === "listener" && source.port).map((source) => source.port),
+  );
+  let port = 9101;
+  while (used.has(port)) port += 1;
+  return port;
+}
+
+function syncModeFields() {
+  const listener = sourceForm.elements.mode.value === "listener";
+  sourceForm.querySelector("[data-field=url]").hidden = listener;
+  sourceForm.querySelector("[data-field=port]").hidden = !listener;
+  sourceForm.elements.url.required = !listener;
+  sourceForm.elements.port.required = listener;
+}
+
 function openEditor(source) {
   sourceForm.hidden = false;
   sourceForm.elements.label.value = source ? source.label : "";
   sourceForm.elements.id.value = source ? source.id : "";
   sourceForm.elements.id.disabled = Boolean(source);
-  sourceForm.elements.url.value = source ? source.url : nextUrl();
+  sourceForm.elements.mode.value = source && source.mode === "listener" ? "listener" : "caller";
+  sourceForm.elements.url.value = source && source.url ? source.url : nextUrl();
+  sourceForm.elements.port.value = source && source.port ? source.port : nextListenPort();
+  syncModeFields();
   sourceForm.dataset.editing = source ? source.id : "";
   document.querySelector("#delete-source").hidden = !source;
   sourceForm.elements.label.focus();
@@ -502,6 +532,7 @@ async function applySourceResponse(next) {
   closeEditor();
 }
 
+sourceForm.elements.mode.addEventListener("change", syncModeFields);
 addSourceButton.addEventListener("click", () => openEditor(null));
 document.querySelector("#cancel-source").addEventListener("click", closeEditor);
 document.querySelector("#delete-source").addEventListener("click", async () => {
@@ -517,9 +548,12 @@ document.querySelector("#delete-source").addEventListener("click", async () => {
 sourceForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const editing = sourceForm.dataset.editing;
+  const listener = sourceForm.elements.mode.value === "listener";
   const body = {
     label: sourceForm.elements.label.value.trim(),
-    url: sourceForm.elements.url.value.trim(),
+    mode: listener ? "listener" : "caller",
+    url: listener ? "" : sourceForm.elements.url.value.trim(),
+    port: listener ? Number(sourceForm.elements.port.value) : null,
   };
   if (!editing) body.id = sourceForm.elements.id.value.trim();
   const path = editing ? `/api/sources/${encodeURIComponent(editing)}` : "/api/sources";

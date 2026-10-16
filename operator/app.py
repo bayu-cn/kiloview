@@ -148,7 +148,8 @@ def sources_path() -> Path:
 
 SOURCE_SCHEMES = {"srt", "rtsp", "rtsps", "rtmp", "rtmps", "udp", "http", "https"}
 LOCAL_HOSTS = {"", "0.0.0.0", "127.0.0.1", "localhost", "::1"}
-BLOCKED_PORTS = {80, 8090, 8554, 8888, 8889, 9997, 1935}
+BLOCKED_PORTS = {80, 8090, 8189, 8554, 8888, 8889, 8890, 9997, 1935}
+listeners: dict[str, dict] = {}
 
 
 def legacy_listener_url(port: int) -> str:
@@ -188,19 +189,45 @@ def yaml_quote(value: str) -> str:
     return f'"{escaped}"'
 
 
-def normalize_source(item: dict) -> dict | None:
+def source_identity(item: dict) -> tuple[str, str] | None:
     source_id = str(item.get("id", "")).strip()
     label = str(item.get("label") or source_id).strip()
-    url = source_url(item)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,40}", source_id):
         return None
     if source_id in SLOTS or source_id.lower() in {"sdi1", "sdi2"}:
         return None
     if not label or len(label) > 48:
         return None
+    return source_id, label
+
+
+def listen_port(item: dict) -> int | None:
+    try:
+        port = int(item.get("port"))
+    except (TypeError, ValueError):
+        return None
+    if 1024 <= port <= 65535:
+        return port
+    return None
+
+
+def normalize_source(item: dict) -> dict | None:
+    identity = source_identity(item)
+    if identity is None:
+        return None
+    source_id, label = identity
+    mode = str(item.get("mode") or "caller").strip().lower()
+    if mode == "listener":
+        port = listen_port(item)
+        if port is None:
+            return None
+        return {"id": source_id, "label": label, "mode": "listener", "port": port, "url": ""}
+    if mode != "caller":
+        return None
+    url = source_url(item)
     if url is None or not valid_source_url(url):
         return None
-    return {"id": source_id, "label": label, "url": url}
+    return {"id": source_id, "label": label, "mode": "caller", "port": None, "url": url}
 
 
 def seed_sources() -> list[dict]:
@@ -208,7 +235,7 @@ def seed_sources() -> list[dict]:
     if parsed:
         return parsed
     names = [part.strip() for part in cfg("SOURCES", "p3-1,p3-2,p3-3,p3-4").split(",") if part.strip()]
-    return [{"id": name, "label": name, "url": legacy_listener_url(3001 + index)} for index, name in enumerate(names)]
+    return [{"id": name, "label": name, "mode": "caller", "url": legacy_listener_url(3001 + index)} for index, name in enumerate(names)]
 
 
 def parse_mediamtx_sources() -> list[dict]:
@@ -266,6 +293,12 @@ def mediamtx_config_path() -> Path | None:
     return Path(raw) if raw else None
 
 
+def mediamtx_source(item: dict) -> str:
+    if item.get("mode") == "listener":
+        return "publisher"
+    return item["url"]
+
+
 def write_mediamtx() -> None:
     path = mediamtx_config_path()
     if path is None or not path.exists():
@@ -274,9 +307,11 @@ def write_mediamtx() -> None:
     head = text.split("paths:", 1)[0].rstrip() if "paths:" in text else text.rstrip()
     lines = ["paths:"]
     for item in catalog:
+        source = mediamtx_source(item)
+        rendered = source if source == "publisher" else yaml_quote(source)
         lines.extend([
             f"  {item['id']}:",
-            f"    source: {yaml_quote(item['url'])}",
+            f"    source: {rendered}",
             "    sourceOnDemand: false",
             "",
         ])
@@ -312,7 +347,7 @@ def mediamtx_call(method: str, path: str, body: dict | None = None) -> tuple[int
 
 def publish_source(item: dict, replace: bool = True) -> str | None:
     payload = {
-        "source": item["url"],
+        "source": mediamtx_source(item),
         "sourceOnDemand": False,
     }
     quoted = urllib.parse.quote(item["id"], safe="")
@@ -332,29 +367,160 @@ def ensure_sources() -> None:
         publish_source(item, replace=False)
 
 
+def stop_listener(source_id: str) -> None:
+    run = listeners.get(source_id)
+    if not run:
+        return
+    run["generation"] += 1
+    proc = run.get("proc")
+    run["proc"] = None
+    if proc is not None and proc.poll() is None:
+        kill_process(proc)
+    listeners.pop(source_id, None)
+
+
+def listener_args(item: dict) -> list[str] | None:
+    binary = "/usr/bin/ffmpeg"
+    if not Path(binary).is_file():
+        return None
+    base = cfg("RTSP_BASE", "rtsp://127.0.0.1:8554").rstrip("/")
+    port = int(item["port"])
+    return [
+        "nice", "-n", "12",
+        binary, "-nostdin", "-hide_banner", "-loglevel", "warning",
+        "-i", f"srt://0.0.0.0:{port}?mode=listener&transtype=live&latency=120000",
+        "-c", "copy",
+        "-muxdelay", "0",
+        "-muxpreload", "0",
+        "-f", "rtsp",
+        "-rtsp_transport", "tcp",
+        f"{base}/{item['id']}",
+    ]
+
+
+def start_listener(source_id: str) -> str | None:
+    item = next((entry for entry in catalog if entry["id"] == source_id), None)
+    if item is None or item.get("mode") != "listener":
+        stop_listener(source_id)
+        return None
+    run = listeners.setdefault(source_id, {"proc": None, "generation": 0, "error": None})
+    proc = run.get("proc")
+    if proc is not None and proc.poll() is None:
+        kill_process(proc)
+    run["proc"] = None
+    run["generation"] += 1
+    generation = run["generation"]
+    args = listener_args(item)
+    if args is None:
+        run["error"] = "Listener needs FFmpeg in the operator image. Rebuild the operator container."
+        return run["error"]
+    LOG_DIR.mkdir(exist_ok=True)
+    log_path = LOG_DIR / f"{source_id}-listen.log"
+    log = open(log_path, "w", encoding="utf-8")
+    log.write(" ".join(args) + "\n\n")
+    log.flush()
+    try:
+        proc = subprocess.Popen(
+            args,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=os.name == "posix",
+        )
+    except OSError as exc:
+        log.write(f"\nListener failed to start: {exc}\n")
+        log.close()
+        run["error"] = str(exc)
+        return str(exc)
+    log.close()
+    run["proc"] = proc
+    run["error"] = None
+    run["started"] = time.monotonic()
+    threading.Thread(target=watch_listener, args=(source_id, generation, proc), daemon=True).start()
+    return None
+
+
+def watch_listener(source_id: str, generation: int, proc: subprocess.Popen) -> None:
+    proc.wait()
+    with lock:
+        run = listeners.get(source_id)
+        if not run or run["generation"] != generation or run.get("proc") is not proc:
+            return
+        run["proc"] = None
+        lived = time.monotonic() - float(run.get("started") or 0)
+        if lived < 3:
+            run["error"] = useful_log(source_id, "-listen") or f"Listener stopped (code {proc.returncode})"
+        else:
+            run["error"] = None
+        threading.Thread(target=restart_listener_later, args=(source_id, generation), daemon=True).start()
+
+
+def restart_listener_later(source_id: str, generation: int) -> None:
+    time.sleep(2)
+    with lock:
+        run = listeners.get(source_id)
+        if not run or run["generation"] != generation:
+            return
+        if not any(item["id"] == source_id and item.get("mode") == "listener" for item in catalog):
+            return
+        start_listener(source_id)
+
+
+def sync_listener(previous: dict | None, item: dict) -> str | None:
+    was_listener = bool(previous and previous.get("mode") == "listener")
+    now_listener = item.get("mode") == "listener"
+    port_changed = was_listener and now_listener and previous.get("port") != item.get("port")
+    if was_listener and (not now_listener or port_changed):
+        stop_listener(item["id"])
+    if now_listener and (not was_listener or port_changed):
+        return start_listener(item["id"])
+    return None
+
+
+def occupied_ports(except_id: str | None = None) -> set[int]:
+    found: set[int] = set()
+    for other in catalog:
+        if other["id"] == except_id:
+            continue
+        if other.get("mode") == "listener" and other.get("port"):
+            found.add(int(other["port"]))
+        parsed = local_port(other.get("url") or "")
+        if parsed:
+            found.add(parsed)
+    return found
+
+
 def validate_source(payload: dict, current_id: str | None = None) -> dict:
+    mode = str(payload.get("mode") or "caller").strip().lower()
     item = normalize_source({
         "id": current_id if current_id else payload.get("id"),
         "label": payload.get("label"),
+        "mode": mode,
         "url": payload.get("url"),
         "port": payload.get("port"),
     })
     if item is None:
+        if mode == "listener":
+            raise ValueError("Name, path ID, or listen port is invalid.")
         raise ValueError("Name, path ID, or source URL is invalid.")
+    if current_id is None and any(other["id"] == item["id"] for other in catalog):
+        raise ValueError("That path ID already exists.")
     for other in catalog:
         if other["id"] == item["id"]:
             continue
-        if other["url"] == item["url"]:
+        if item["url"] and other.get("url") == item["url"]:
             raise ValueError(f"That source URL is already used by {other['label']}.")
-        mine = local_port(item["url"])
-        theirs = local_port(other["url"])
-        if mine and theirs and mine == theirs:
-            raise ValueError(f"Port {mine} is already used by {other['label']}.")
-    if current_id is None and any(other["id"] == item["id"] for other in catalog):
-        raise ValueError("That path ID already exists.")
-    port = local_port(item["url"])
-    if port in BLOCKED_PORTS:
-        raise ValueError(f"Port {port} is used by another service.")
+    if item["mode"] == "listener":
+        port = int(item["port"])
+        if port in BLOCKED_PORTS:
+            raise ValueError(f"Port {port} is used by another service.")
+        if port in occupied_ports(current_id):
+            raise ValueError(f"Port {port} is already used.")
+    else:
+        port = local_port(item["url"])
+        if port in BLOCKED_PORTS:
+            raise ValueError(f"Port {port} is used by another service.")
+        if port and port in occupied_ports(current_id):
+            raise ValueError(f"Port {port} is already used.")
     return item
 
 
@@ -760,6 +926,8 @@ def stop_all() -> None:
                 kill_process(proc)
             if preview is not None:
                 kill_process(preview)
+        for source_id in list(listeners):
+            stop_listener(source_id)
 
 
 def webrtc_base() -> str:
@@ -825,7 +993,10 @@ def snapshot() -> dict:
             {
                 "id": source["id"],
                 "label": source["label"],
-                "url": source["url"],
+                "mode": source.get("mode") or "caller",
+                "url": source.get("url") or "",
+                "port": source.get("port"),
+                "ingestError": (listeners.get(source["id"]) or {}).get("error"),
                 "ready": bool(ready.get(source["id"])),
                 "whep": f"{web}/{urllib.parse.quote(source['id'])}/whep",
                 "routedTo": routed.get(source["id"], []),
@@ -988,7 +1159,10 @@ def add_source(payload: dict) -> str | None:
         catalog.append(item)
         save_catalog()
     write_mediamtx()
-    return publish_source(item, replace=True)
+    warning = publish_source(item, replace=True)
+    with lock:
+        listen_error = sync_listener(None, item)
+    return warning or listen_error
 
 
 def update_source(source_id: str, payload: dict) -> str | None:
@@ -1002,11 +1176,14 @@ def update_source(source_id: str, payload: dict) -> str | None:
                 catalog[index] = item
                 break
         save_catalog()
-        url_changed = previous["url"] != item["url"]
-    if not url_changed:
-        return None
-    write_mediamtx()
-    return publish_source(item, replace=True)
+        source_changed = mediamtx_source(previous) != mediamtx_source(item)
+    warning = None
+    if source_changed:
+        write_mediamtx()
+        warning = publish_source(item, replace=True)
+    with lock:
+        listen_error = sync_listener(previous, item)
+    return warning or listen_error
 
 
 def delete_source(source_id: str) -> None:
@@ -1015,6 +1192,7 @@ def delete_source(source_id: str) -> None:
             raise ValueError("Clear this source from SDI before deleting it.")
         if source_id not in sources():
             raise ValueError("Unknown source.")
+        stop_listener(source_id)
         catalog[:] = [item for item in catalog if item["id"] != source_id]
         save_catalog()
     write_mediamtx()
@@ -1329,6 +1507,10 @@ def main() -> None:
     except OSError as exc:
         print(f"MediaMTX config tidak tertulis: {exc}", flush=True)
     ensure_sources()
+    with lock:
+        for item in catalog:
+            if item.get("mode") == "listener":
+                start_listener(item["id"])
     state = load_state()
     with lock:
         for slot_id, slot in state.items():
