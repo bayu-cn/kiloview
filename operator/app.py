@@ -95,9 +95,23 @@ def outputs_path() -> Path:
 def save_outputs() -> None:
     payload = []
     for slot_id, meta in SLOTS.items():
-        item = {"id": slot_id, "label": meta["label"], "device": meta["device"]}
+        kind = meta.get("kind") or "sdi"
+        item = {
+            "id": slot_id,
+            "label": meta["label"],
+            "kind": kind,
+            "device": meta.get("device") or 0,
+        }
         if meta.get("persistent_id") is not None:
             item["persistentId"] = meta["persistent_id"]
+        if kind == "srt":
+            item["srtMode"] = meta.get("srt_mode") or "listener"
+            if item["srtMode"] == "listener":
+                item["port"] = meta.get("port")
+            else:
+                item["url"] = meta.get("url") or ""
+        if kind == "ndi":
+            item["ndiName"] = meta.get("ndi_name") or meta["label"]
         payload.append(item)
     path = outputs_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,7 +136,8 @@ def load_outputs() -> None:
         if not isinstance(item, dict):
             continue
         slot_id = str(item.get("id") or "")
-        if not re.fullmatch(r"sdi\d+", slot_id):
+        kind = str(item.get("kind") or "sdi").strip().lower()
+        if kind not in {"sdi", "srt", "ndi"} or not re.fullmatch(rf"{kind}\d+", slot_id):
             continue
         label = str(item.get("label") or slot_id).strip() or slot_id
         if len(label) > 48:
@@ -131,14 +146,35 @@ def load_outputs() -> None:
             device = int(item.get("device") or 0)
         except (TypeError, ValueError):
             device = 0
-        meta = {"label": label, "device": device}
-        raw_id = item.get("persistentId")
-        if isinstance(raw_id, int):
-            meta["persistent_id"] = raw_id
-        elif isinstance(raw_id, str):
-            parsed = parse_persistent_id(raw_id)
-            if parsed is not None:
-                meta["persistent_id"] = parsed
+        meta = {"label": label, "kind": kind, "device": device}
+        if kind == "sdi":
+            raw_id = item.get("persistentId")
+            if isinstance(raw_id, int):
+                meta["persistent_id"] = raw_id
+            elif isinstance(raw_id, str):
+                parsed = parse_persistent_id(raw_id)
+                if parsed is not None:
+                    meta["persistent_id"] = parsed
+        elif kind == "srt":
+            srt_mode = str(item.get("srtMode") or "listener").strip().lower()
+            if srt_mode not in {"caller", "listener"}:
+                continue
+            meta["srt_mode"] = srt_mode
+            if srt_mode == "listener":
+                port = listen_port(item)
+                if port is None:
+                    continue
+                meta["port"] = port
+            else:
+                target = normalize_srt_target(str(item.get("url") or ""))
+                if target is None:
+                    continue
+                meta["url"] = target
+        else:
+            ndi_name = clean_ndi_name(item.get("ndiName") or label)
+            if ndi_name is None:
+                continue
+            meta["ndi_name"] = ndi_name
         loaded[slot_id] = meta
     if loaded:
         SLOTS.clear()
@@ -251,7 +287,7 @@ def source_identity(item: dict) -> tuple[str, str] | None:
     label = str(item.get("label") or source_id).strip()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,40}", source_id):
         return None
-    if source_id in SLOTS or re.fullmatch(r"sdi\d+", source_id.lower()):
+    if source_id in SLOTS or re.fullmatch(r"(sdi|srt|ndi)\d+", source_id.lower()):
         return None
     if not label or len(label) > 48:
         return None
@@ -266,6 +302,29 @@ def listen_port(item: dict) -> int | None:
     if 1024 <= port <= 65535:
         return port
     return None
+
+
+def normalize_srt_target(raw: str) -> str | None:
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    if "://" not in text:
+        text = "srt://" + text
+    parsed = urllib.parse.urlparse(text)
+    if parsed.scheme != "srt" or not parsed.hostname or not parsed.port:
+        return None
+    if not 1 <= parsed.port <= 65535:
+        return None
+    return f"srt://{parsed.hostname}:{parsed.port}"
+
+
+def clean_ndi_name(raw: object) -> str | None:
+    name = str(raw or "").strip()
+    if not name or len(name) > 48:
+        return None
+    if any(ord(char) < 32 or char in "\"\\!" for char in name):
+        return None
+    return name
 
 
 def normalize_source(item: dict) -> dict | None:
@@ -310,7 +369,7 @@ def parse_mediamtx_sources() -> list[dict]:
             continue
         if re.match(r"^  [^ #\s].*:$", line):
             name = line.strip()[:-1]
-            current = None if name in SLOTS or re.fullmatch(r"sdi\d+", name) else {"id": name, "label": name}
+            current = None if name in SLOTS or re.fullmatch(r"(sdi|srt|ndi)\d+", name) else {"id": name, "label": name}
             if current:
                 found.append(current)
             continue
@@ -532,11 +591,11 @@ def scan_decklink() -> tuple[list[dict], str | None]:
     return devices, None
 
 
-def next_slot_id() -> str:
+def next_slot_id(prefix: str) -> str:
     number = 1
-    while f"sdi{number}" in SLOTS:
+    while f"{prefix}{number}" in SLOTS:
         number += 1
-    return f"sdi{number}"
+    return f"{prefix}{number}"
 
 
 def fresh_runtime(has_source: bool = False) -> dict:
@@ -557,24 +616,50 @@ def add_output(payload: dict) -> str | None:
     label = str(payload.get("label") or "").strip()
     if not label or len(label) > 48:
         raise ValueError("Output name is invalid.")
-    try:
-        persistent = int(payload.get("persistentId"))
-    except (TypeError, ValueError):
-        raise ValueError("Choose a DeckLink card.")
-    devices, scan_error = scan_decklink()
-    match = next((item for item in devices if item["persistent_id"] == persistent), None)
-    if match is None:
-        raise ValueError(scan_error or "That card is not available.")
+    kind = str(payload.get("kind") or "sdi").strip().lower()
+    if kind not in {"sdi", "srt", "ndi"}:
+        raise ValueError("Unknown output type.")
+    meta: dict = {"label": label, "kind": kind, "device": 0}
+    if kind == "sdi":
+        try:
+            persistent = int(payload.get("persistentId"))
+        except (TypeError, ValueError):
+            raise ValueError("Choose a DeckLink card.")
+        devices, scan_error = scan_decklink()
+        match = next((item for item in devices if item["persistent_id"] == persistent), None)
+        if match is None:
+            raise ValueError(scan_error or "That card is not available.")
+        meta["device"] = int(match.get("device") or 0)
+        meta["persistent_id"] = persistent
+    elif kind == "srt":
+        srt_mode = str(payload.get("srtMode") or "listener").strip().lower()
+        if srt_mode not in {"caller", "listener"}:
+            raise ValueError("Unknown SRT direction.")
+        meta["srt_mode"] = srt_mode
+        if srt_mode == "listener":
+            port = listen_port(payload)
+            if port is None:
+                raise ValueError("Listen port is invalid.")
+            if port in BLOCKED_PORTS or port in occupied_ports():
+                raise ValueError(f"Port {port} is already used.")
+            meta["port"] = port
+        else:
+            target = normalize_srt_target(str(payload.get("url") or ""))
+            if target is None:
+                raise ValueError("Remote SRT URL is invalid.")
+            meta["url"] = target
+    else:
+        ndi_name = clean_ndi_name(payload.get("ndiName") or label)
+        if ndi_name is None:
+            raise ValueError("NDI name is invalid.")
+        if any(item.get("ndi_name") == ndi_name for item in SLOTS.values()):
+            raise ValueError("That NDI name is already used.")
+        meta["ndi_name"] = ndi_name
     with lock:
-        for meta in SLOTS.values():
-            if meta.get("persistent_id") == persistent:
-                raise ValueError("That card is already assigned.")
-        slot_id = next_slot_id()
-        SLOTS[slot_id] = {
-            "label": label,
-            "device": int(match.get("device") or 0),
-            "persistent_id": persistent,
-        }
+        if kind == "sdi" and any(item.get("persistent_id") == meta.get("persistent_id") for item in SLOTS.values()):
+            raise ValueError("That card is already assigned.")
+        slot_id = next_slot_id(kind)
+        SLOTS[slot_id] = meta
         save_outputs()
         state[slot_id] = {"source": None, "mode": "1080i50", "audio": "1-2", "locked": False}
         runtime[slot_id] = fresh_runtime(False)
@@ -733,6 +818,9 @@ def occupied_ports(except_id: str | None = None) -> set[int]:
         parsed = local_port(other.get("url") or "")
         if parsed:
             found.add(parsed)
+    for meta in SLOTS.values():
+        if meta.get("kind") == "srt" and meta.get("srt_mode") == "listener" and meta.get("port"):
+            found.add(int(meta["port"]))
     return found
 
 
@@ -929,6 +1017,80 @@ def pipeline_args(slot_id: str) -> list[str]:
     ]
 
 
+def srt_output_args(slot_id: str) -> list[str] | None:
+    binary = "/usr/bin/ffmpeg"
+    if not Path(binary).is_file():
+        return None
+    meta = SLOTS[slot_id]
+    source = state[slot_id]["source"]
+    base = cfg("RTSP_BASE", "rtsp://127.0.0.1:8554").rstrip("/")
+    if meta.get("srt_mode") == "listener":
+        target = (
+            f"srt://0.0.0.0:{int(meta['port'])}"
+            "?mode=listener&transtype=live&latency=120000&pkt_size=1316"
+        )
+    else:
+        target = f"{meta['url']}?mode=caller&transtype=live&latency=120000&pkt_size=1316"
+    return [
+        "nice", "-n", "12",
+        binary, "-nostdin", "-hide_banner", "-loglevel", "warning",
+        "-rtsp_transport", "tcp",
+        "-i", f"{base}/{source}",
+        "-c", "copy",
+        "-f", "mpegts",
+        target,
+    ]
+
+
+def gst_has_element(name: str) -> bool:
+    cached = getattr(gst_has_element, "cache", {})
+    if name in cached:
+        return cached[name]
+    binary = Path(cfg("GST_LAUNCH", "gst-launch-1.0")).with_name("gst-inspect-1.0")
+    found = False
+    if binary.is_file():
+        try:
+            result = subprocess.run(
+                [str(binary), name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+            )
+            found = result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            found = False
+    cached[name] = found
+    gst_has_element.cache = cached
+    return found
+
+
+def ndi_output_args(slot_id: str) -> list[str]:
+    meta = SLOTS[slot_id]
+    source = state[slot_id]["source"]
+    location = f"{cfg('RTSP_BASE', 'rtsp://127.0.0.1:8554').rstrip('/')}/{source}"
+    ndi_name = str(meta.get("ndi_name") or meta["label"]).replace('"', "")
+    return [
+        cfg("GST_LAUNCH", "gst-launch-1.0"), "-e",
+        "rtspsrc", f"location={location}", "latency=200", "protocols=tcp", "name=src",
+        "src.", "!", "application/x-rtp,media=video", "!", "decodebin", "!", "queue", "!",
+        "videoconvert", "!", "video/x-raw,format=UYVY", "!",
+        "ndisinkcombiner", "name=combiner", "!", "ndisink", f'ndi-name="{ndi_name}"',
+        "src.", "!", "application/x-rtp,media=audio", "!", "decodebin", "!", "queue", "!",
+        "audioconvert", "!", "audioresample", "!",
+        "audio/x-raw,format=F32LE,rate=48000,channels=2", "!",
+        "combiner.audio",
+    ]
+
+
+def output_args(slot_id: str) -> list[str] | None:
+    kind = SLOTS[slot_id].get("kind") or "sdi"
+    if kind == "srt":
+        return srt_output_args(slot_id)
+    if kind == "ndi":
+        return ndi_output_args(slot_id)
+    return pipeline_args(slot_id)
+
+
 def kill_process(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return
@@ -1007,7 +1169,18 @@ def start_pipeline(slot_id: str) -> None:
 
     LOG_DIR.mkdir(exist_ok=True)
     log_path = LOG_DIR / f"{slot_id}.log"
-    args = pipeline_args(slot_id)
+    kind = SLOTS[slot_id].get("kind") or "sdi"
+    if kind == "ndi" and not gst_has_element("ndisink"):
+        run["status"] = "error"
+        run["error"] = "NDI output needs the NDI plugin (ndisink) and the NDI runtime on this server."
+        start_preview(slot_id)
+        return
+    args = output_args(slot_id)
+    if not args:
+        run["status"] = "error"
+        run["error"] = "This output needs FFmpeg in the operator image."
+        start_preview(slot_id)
+        return
     log = open(log_path, "w", encoding="utf-8")
     log.write(" ".join(args) + "\n\n")
     log.flush()
@@ -1052,7 +1225,11 @@ def watch_pipeline(slot_id: str, generation: int, proc: subprocess.Popen) -> Non
         if run["generation"] != generation or run["proc"] is not proc:
             return
         run["proc"] = None
-        if state[slot_id]["source"] and signal_lost(read_log(slot_id)):
+        log_text = read_log(slot_id)
+        lowered = log_text.lower()
+        kind = SLOTS[slot_id].get("kind") or "sdi"
+        permanent = "no element" in lowered or "address already in use" in lowered
+        if state[slot_id]["source"] and not permanent and (signal_lost(log_text) or kind != "sdi"):
             run["status"] = "waiting"
             run["error"] = None
             run["preview_error"] = None
@@ -1065,7 +1242,10 @@ def watch_pipeline(slot_id: str, generation: int, proc: subprocess.Popen) -> Non
             threading.Thread(target=restart_later, args=(slot_id, generation), daemon=True).start()
             return
         run["status"] = "error"
-        run["error"] = explain_sdi_error(useful_log(slot_id), SLOTS[slot_id]["device"]) or f"GStreamer stopped (code {proc.returncode})"
+        if kind == "sdi":
+            run["error"] = explain_sdi_error(useful_log(slot_id), SLOTS[slot_id]["device"]) or f"GStreamer stopped (code {proc.returncode})"
+        else:
+            run["error"] = useful_log(slot_id) or f"Output stopped (code {proc.returncode})"
 
 
 def restart_later(slot_id: str, generation: int) -> None:
@@ -1209,11 +1389,17 @@ def snapshot() -> dict:
         run = runs_copy[slot_id]
         if slot["source"]:
             routed.setdefault(slot["source"], []).append(meta["label"])
+        kind = meta.get("kind") or "sdi"
         pid = meta.get("persistent_id")
         slots_out[slot_id] = {
             "label": meta["label"],
-            "device": meta["device"],
-            "card": card_label(pid) if pid else f"device {meta['device']}",
+            "kind": kind,
+            "device": meta.get("device") or 0,
+            "card": card_label(pid) if pid else "",
+            "srtMode": meta.get("srt_mode") or "",
+            "port": meta.get("port"),
+            "url": meta.get("url") or "",
+            "ndiName": meta.get("ndi_name") or "",
             "source": slot["source"],
             "mode": slot["mode"],
             "audio": slot["audio"],
@@ -1452,12 +1638,13 @@ def apply_slot(slot_id: str, payload: dict, is_admin: bool = False) -> None:
             raise ValueError("Unknown source.")
         routed = routed or slot["source"] != source
         slot["source"] = source
-    if "mode" in payload:
+    kind = SLOTS[slot_id].get("kind") or "sdi"
+    if kind == "sdi" and "mode" in payload:
         if payload["mode"] not in MODES:
             raise ValueError("Unknown video mode.")
         routed = routed or slot["mode"] != payload["mode"]
         slot["mode"] = payload["mode"]
-    if "audio" in payload:
+    if kind == "sdi" and "audio" in payload:
         if payload["audio"] not in AUDIO:
             raise ValueError("Unknown audio map.")
         routed = routed or slot["audio"] != payload["audio"]

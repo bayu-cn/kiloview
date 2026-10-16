@@ -396,7 +396,7 @@ function paint() {
     assigned.textContent = slot.source ? (state.admin ? slot.source : (named ? named.label : "Live")) : "Empty";
     hint.textContent = held
       ? "Locked"
-      : (slot.source ? "Drop another source to replace" : "Drop a source here");
+      : (routeText(slot) || (slot.source ? "Drop another source to replace" : "Drop a source here"));
     const lockBtn = box.querySelector("[data-lock]");
     const lockMark = box.querySelector("[data-lock-mark]");
     lockBtn.textContent = slot.locked ? "Unlock" : "Lock";
@@ -407,8 +407,11 @@ function paint() {
     status.textContent = statusText(slot);
     const mode = box.querySelector("[data-mode]");
     const audio = box.querySelector("[data-audio]");
-    if (document.activeElement !== mode) mode.value = slot.mode;
-    if (document.activeElement !== audio) audio.value = slot.audio;
+    const passthrough = slot.kind && slot.kind !== "sdi";
+    mode.closest("label").hidden = passthrough;
+    audio.closest("label").hidden = passthrough;
+    if (!passthrough && document.activeElement !== mode) mode.value = slot.mode;
+    if (!passthrough && document.activeElement !== audio) audio.value = slot.audio;
     const busy = slot.status === "starting";
     mode.disabled = busy || held;
     audio.disabled = busy || held;
@@ -548,41 +551,86 @@ function closeOutputEditor() {
   outputForm.hidden = true;
 }
 
-function nextOutputLabel() {
+function nextOutputLabel(kind) {
+  const prefix = kind === "srt" ? "SRT" : kind === "ndi" ? "NDI" : "SDI";
   const used = new Set(Object.values(state.slots).map((slot) => slot.label));
   let number = 1;
-  while (used.has(`SDI ${number}`)) number += 1;
-  return `SDI ${number}`;
+  while (used.has(`${prefix} ${number}`)) number += 1;
+  return `${prefix} ${number}`;
 }
 
-async function openOutputEditor() {
-  outputForm.hidden = false;
-  outputForm.elements.label.value = nextOutputLabel();
+function nextOutputPort() {
+  const used = new Set();
+  state.sources.forEach((source) => {
+    if (source.mode === "listener" && source.port) used.add(source.port);
+  });
+  Object.values(state.slots).forEach((slot) => {
+    if (slot.kind === "srt" && slot.srtMode === "listener" && slot.port) used.add(slot.port);
+  });
+  let port = 9201;
+  while (used.has(port)) port += 1;
+  return port;
+}
+
+function routeText(slot) {
+  if (slot.kind === "srt" && slot.srtMode === "listener") return `SRT listener · UDP ${slot.port}`;
+  if (slot.kind === "srt") return `SRT caller · ${slot.url}`;
+  if (slot.kind === "ndi") return `NDI · ${slot.ndiName}`;
+  return "";
+}
+
+function syncOutputFields() {
+  const kind = outputForm.elements.kind.value;
+  const caller = outputForm.elements.srtMode.value === "caller";
+  outputForm.querySelector("[data-field=card]").hidden = kind !== "sdi";
+  outputForm.querySelector("[data-field=srt-mode]").hidden = kind !== "srt";
+  outputForm.querySelector("[data-field=srt-port]").hidden = kind !== "srt" || caller;
+  outputForm.querySelector("[data-field=srt-url]").hidden = kind !== "srt" || !caller;
+  outputForm.querySelector("[data-field=ndi]").hidden = kind !== "ndi";
+  outputForm.elements.persistentId.required = kind === "sdi";
+  outputForm.elements.port.required = kind === "srt" && !caller;
+  outputForm.elements.url.required = kind === "srt" && caller;
+  outputForm.elements.ndiName.required = kind === "ndi";
+}
+
+async function loadDeckLinkOptions() {
   const select = outputForm.elements.persistentId;
   select.innerHTML = "";
   select.disabled = true;
   outputNote.textContent = "Checking DeckLink cards...";
+  const data = await api("/api/decklink");
+  if (!data) return;
+  const devices = data.devices || [];
+  devices.forEach((device) => {
+    const option = document.createElement("option");
+    option.value = String(device.persistentId);
+    option.disabled = !!device.used;
+    option.textContent = device.used
+      ? `${device.name} (${device.card}) — used by ${device.usedBy}`
+      : `${device.name} (${device.card})`;
+    select.appendChild(option);
+  });
+  const free = devices.find((device) => !device.used);
+  select.disabled = !free;
+  if (free) select.value = String(free.persistentId);
+  outputNote.textContent = devices.length
+    ? (free
+      ? "Cards already assigned stay in the list and cannot be selected."
+      : "Every detected card is already assigned.")
+    : (data.error || "No DeckLink playback card was reported.");
+}
+
+async function openOutputEditor() {
+  outputForm.hidden = false;
+  outputForm.elements.kind.value = "sdi";
+  outputForm.elements.srtMode.value = "listener";
+  outputForm.elements.port.value = nextOutputPort();
+  outputForm.elements.url.value = "";
+  outputForm.elements.label.value = nextOutputLabel("sdi");
+  outputForm.elements.ndiName.value = outputForm.elements.label.value;
+  syncOutputFields();
   try {
-    const data = await api("/api/decklink");
-    if (!data) return;
-    const devices = data.devices || [];
-    devices.forEach((device) => {
-      const option = document.createElement("option");
-      option.value = String(device.persistentId);
-      option.disabled = !!device.used;
-      option.textContent = device.used
-        ? `${device.name} (${device.card}) — used by ${device.usedBy}`
-        : `${device.name} (${device.card})`;
-      select.appendChild(option);
-    });
-    const free = devices.find((device) => !device.used);
-    select.disabled = !free;
-    if (free) select.value = String(free.persistentId);
-    outputNote.textContent = devices.length
-      ? (free
-        ? "Cards already assigned stay in the list and cannot be selected."
-        : "Every detected card is already assigned.")
-      : (data.error || "No DeckLink playback card was reported.");
+    await loadDeckLinkOptions();
   } catch (error) {
     outputNote.textContent = error.message;
   }
@@ -645,22 +693,48 @@ sourceForm.addEventListener("submit", async (event) => {
   }
 });
 addOutputButton.addEventListener("click", () => openOutputEditor());
+outputForm.elements.kind.addEventListener("change", () => {
+  outputForm.elements.label.value = nextOutputLabel(outputForm.elements.kind.value);
+  if (outputForm.elements.kind.value === "ndi") {
+    outputForm.elements.ndiName.value = outputForm.elements.label.value;
+  }
+  syncOutputFields();
+  if (outputForm.elements.kind.value === "sdi" && !outputForm.elements.persistentId.options.length) {
+    loadDeckLinkOptions().catch((error) => {
+      outputNote.textContent = error.message;
+    });
+  }
+  if (outputForm.elements.kind.value !== "sdi") {
+    outputNote.textContent = outputForm.elements.kind.value === "ndi"
+      ? "NDI sends the source as it arrives. SDI cards stay on their own outputs."
+      : "SRT sends the source as it arrives. Open the UDP port on the firewall for a listener.";
+  }
+});
+outputForm.elements.srtMode.addEventListener("change", syncOutputFields);
 document.querySelector("#cancel-output").addEventListener("click", closeOutputEditor);
 outputForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const selected = outputForm.elements.persistentId.selectedOptions[0];
-  if (!selected || selected.disabled) {
-    window.alert("Choose a DeckLink card that is not already assigned.");
-    return;
+  const kind = outputForm.elements.kind.value;
+  const body = {
+    label: outputForm.elements.label.value.trim(),
+    kind,
+  };
+  if (kind === "sdi") {
+    const selected = outputForm.elements.persistentId.selectedOptions[0];
+    if (!selected || selected.disabled) {
+      window.alert("Choose a DeckLink card that is not already assigned.");
+      return;
+    }
+    body.persistentId = Number(selected.value);
+  } else if (kind === "srt") {
+    body.srtMode = outputForm.elements.srtMode.value;
+    if (body.srtMode === "listener") body.port = Number(outputForm.elements.port.value);
+    else body.url = outputForm.elements.url.value.trim();
+  } else {
+    body.ndiName = outputForm.elements.ndiName.value.trim();
   }
   try {
-    const next = await api("/api/outputs", {
-      method: "POST",
-      body: JSON.stringify({
-        label: outputForm.elements.label.value.trim(),
-        persistentId: Number(selected.value),
-      }),
-    });
+    const next = await api("/api/outputs", { method: "POST", body: JSON.stringify(body) });
     await applyOutputResponse(next);
   } catch (error) {
     window.alert(error.message);

@@ -59,8 +59,8 @@
     <section class="outputs">
       <div class="section-head split">
         <div>
-          <h2>SDI outputs</h2>
-          <p>The preview uses the same source and audio map as the SDI cable. Volume is only for listening on this page.</p>
+          <h2>Outputs</h2>
+          <p>SDI follows the video mode and audio map. SRT and NDI pass the source through. Volume is only for listening on this page.</p>
         </div>
         <button type="button" id="add-output" hidden>Add output</button>
       </div>
@@ -68,8 +68,32 @@
         <label>Display name
           <input name="label" maxlength="48" required>
         </label>
-        <label>DeckLink card
-          <select name="persistentId" required></select>
+        <label>Type
+          <select name="kind">
+            <option value="sdi">SDI — DeckLink card</option>
+            <option value="srt">SRT</option>
+            <option value="ndi">NDI</option>
+          </select>
+        </label>
+        <label data-field="card">DeckLink card
+          <select name="persistentId"></select>
+        </label>
+        <label data-field="srt-mode" hidden>SRT direction
+          <select name="srtMode">
+            <option value="listener">Listener — wait on a port you choose</option>
+            <option value="caller">Caller — this server calls the remote</option>
+          </select>
+        </label>
+        <label data-field="srt-port" hidden>Listen port
+          <input name="port" type="number" min="1024" max="65535" inputmode="numeric">
+          <span class="field-note">The receiver calls this server on that UDP port. The picture is the source as it arrives.</span>
+        </label>
+        <label data-field="srt-url" hidden>Remote URL
+          <input name="url" type="text" maxlength="300" spellcheck="false" autocomplete="off" placeholder="srt://10.0.0.8:9000">
+        </label>
+        <label data-field="ndi" hidden>NDI name
+          <input name="ndiName" maxlength="48" spellcheck="false" autocomplete="off">
+          <span class="field-note">This name shows up on the NDI network. The server needs the NDI runtime.</span>
         </label>
         <p class="field-note" id="output-note"></p>
         <div class="editor-actions">
