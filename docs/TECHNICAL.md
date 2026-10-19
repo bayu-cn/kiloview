@@ -7,7 +7,7 @@ Satu mesin HP Z420 (`172.17.20.34`) menjalankan KiloLink, MediaMTX, dan operator
 | Layanan | Di mana | Port yang dipakai |
 | --- | --- | --- |
 | KiloLink Server | Docker, network host, Z420 | `80`, bonding `50000–50001`, AV `30000–30300`, SRT listener `3001+` |
-| MediaMTX `bluenviron/mediamtx:1` | Docker, network host, Z420 | API `9997`, RTSP `8554`, HLS `8888`, WebRTC `8889`, RTMP `1935`, UDP media `8189` |
+| MediaMTX `bluenviron/mediamtx:1` | Docker, network host, Z420 | API `9997`, RTSP `8554`, HLS `8888`, WebRTC `8889`, RTMP `1935`, SRT `8890`, UDP media `8189` |
 | Operator STREAM ROUTE | Docker, network host, privileged, Z420 | `8090` |
 | Halaman publik | NPM | `https://kiloview.cnn.co.id` → `:8090` |
 | Preview WebRTC | NPM | `https://webrtc-kiloview.cnn.co.id` → `:8889` |
@@ -27,7 +27,19 @@ P3 Mini
                                 -->  GStreamer host  -->  DeckLink  -->  kabel SDI
 ```
 
-Sumber tidak harus SRT. Halaman admin menyimpan satu URL. MediaMTX menarik URL itu. RTMP Univiso berbentuk `rtmp://IP/live/KODE?univiso_golivestream=1`. RTMP listen di port `1935`. Banyak stream dibedakan oleh path, bukan oleh banyak port listen.
+Sumber tidak harus SRT. Halaman admin menyimpan satu URL untuk input **caller**. MediaMTX menarik URL itu. RTMP Univiso berbentuk `rtmp://IP/live/KODE?univiso_golivestream=1`. RTMP listen di port `1935`. Banyak stream caller dibedakan oleh path, bukan oleh banyak port listen.
+
+Input **listener** beda. MediaMTX hanya punya satu server SRT, bawaan UDP `8890`. Supaya tiap input bisa punya port sendiri, container operator menjalankan FFmpeg:
+
+```text
+pengirim luar  -->  srt://172.17.20.34:<port>  (FFmpeg di operator, mode listener)
+                      -->  srt://127.0.0.1:8890?streamid=publish:<path-id>&pkt_size=1316
+                            -->  path MediaMTX
+```
+
+Isi yang diteruskan adalah MPEG-TS asli. Menyalin ke RTSP membuat MediaMTX tetap `stream not found` karena SPS/PPS hilang. Container MediaMTX tidak di-restart saat input baru ditambah. Port listener itu harus dibuka di firewall host sebagai UDP. `ports:` di Compose tidak dipakai karena kedua container `network_mode: host`.
+
+Keluaran SRT dan NDI juga proses terpisah di operator, membaca RTSP sumber yang sama. SRT listener membuka port UDP yang dipilih IT. SRT caller menelepon URL lawan. Keduanya `-c copy`. NDI memakai GStreamer host (`ndisink` + `ndisinkcombiner`) dan mengirim video UYVY plus audio F32LE. Itu bukan format 1080i50 kabel SDI.
 
 Dari MediaMTX ke SDI, operator membuka RTSP `rtsp://127.0.0.1:8554/<path-id>` dengan TCP.
 
@@ -49,7 +61,15 @@ keycloak/stream-route/   theme login realm kiloview
 docs/              konteks AI, teknis, operasi
 ```
 
-Operator adalah Python stdlib (`ThreadingHTTPServer`), bukan framework web. State slot ada di `operator/data/state.json`. Katalog input ada di `operator/data/sources.json`. Keduanya hidup di volume Docker `./data` pada server.
+Operator adalah Python stdlib (`ThreadingHTTPServer`), bukan framework web. Tiga file di volume Docker `./data` pada server:
+
+| File | Isi |
+| --- | --- |
+| `state.json` | Sumber, mode video, peta audio, dan kunci tiap output |
+| `sources.json` | Katalog input: nama, path, caller/listener, URL atau port |
+| `outputs.json` | Daftar output: SDI (persistent ID), SRT (arah dan port/URL), NDI (nama) |
+
+Dua SDI awal diisi dari `SDI1_PERSISTENT_ID` dan `SDI2_PERSISTENT_ID` hanya saat `outputs.json` belum ada. Setelah file itu ada, daftar output mengikuti file, bukan env.
 
 `mediamtx.yml` di git masih menulis `webrtcAdditionalHosts: [172.17.20.46]`. Di server, header itu harus `172.17.20.34`. Operator hanya menulis ulang mulai dari `paths:` ke bawah. Header tidak ikut tertimpa saat seseorang menambah input dari halaman.
 
@@ -140,19 +160,36 @@ curl.exe -s --compressed -H "Accept-Encoding: gzip, deflate, br, zstd" "https://
 
 ## DeckLink
 
-Dua kartu **DeckLink 4K Extreme**. Masing-masing satu kanal playback. Persistent ID (dari firmware, ditulis tanpa `0x`):
+Dua kartu awal **DeckLink 4K Extreme**. Masing-masing satu kanal playback. Persistent ID (dari firmware, ditulis tanpa `0x`):
 
 - SDI 1: `40604f81`
 - SDI 2: `49205acf`
 
 GStreamer memakai ID itu sebagai bilangan desimal, lalu mengabaikan device-number. Kalau ID kosong, cadangannya device 0 untuk SDI 1 dan device 1 untuk SDI 2.
 
+IT menambah SDI dari halaman. Operator menjalankan `gst-device-monitor-1.0` di host dan hanya menampilkan perangkat `Video/Sink` yang punya persistent ID. ID yang sudah terpasang tetap muncul, tetapi tidak bisa dipilih. Kartu fisik harus sudah terlihat driver Blackmagic. Bukan Duo 2.
+
 ## Katalog input
 
-Path ID: huruf atau angka di depan, lalu huruf, angka, `_`, `-`, paling panjang 41 karakter. `sdi1` dan `sdi2` tidak boleh dipakai sebagai ID sumber.
+Path ID: huruf atau angka di depan, lalu huruf, angka, `_`, `-`, paling panjang 41 karakter. ID berbentuk `sdiN`, `srtN`, atau `ndiN` tidak boleh dipakai sebagai ID sumber.
 
-URL lokal tidak boleh memakai port `80`, `8090`, `8554`, `8888`, `8889`, `9997`, atau `1935`.
+URL lokal dan port listener tidak boleh memakai `80`, `8090`, `8189`, `8554`, `8888`, `8889`, `8890`, `9997`, atau `1935`. Port yang sama tidak boleh dipakai dua input atau satu input dan satu output listener.
 
-Menyimpan input baru menulis path ke `mediamtx.yml` dan memanggil API `POST /v3/config/paths/add/{name}`. Mengganti URL memakai `replace`. Mengganti display name saja tidak membuat path ulang. Hapus ditolak kalau sumber itu sedang dipasang ke SDI.
+Menyimpan input baru menulis path ke `mediamtx.yml` dan memanggil API `POST /v3/config/paths/add/{name}`. Mengganti URL caller memakai `replace` pada path itu saja. Mengganti display name saja tidak membuat path ulang. Hapus ditolak kalau sumber itu sedang dipasang ke sebuah output.
 
-Saat container operator mulai: katalog dimuat, yml ditulis, path yang belum ada di-add (yang sudah ada tidak di-replace), lalu pipeline slot yang tersimpan dinyalakan lagi.
+Saat container operator mulai: katalog dimuat, yml ditulis, path yang belum ada di-add (yang sudah ada tidak di-replace), listener yang tersimpan dibuka lagi, lalu pipeline output yang tersimpan dinyalakan lagi.
+
+## Keluaran
+
+`outputs.json` menyimpan jenis tiap slot.
+
+| Jenis | Proses | Catatan |
+| --- | --- | --- |
+| SDI | GStreamer host ke DeckLink | `1080i50` atau `1080p60`, plus peta audio |
+| SRT listener | FFmpeg `-c copy` ke `srt://0.0.0.0:<port>?mode=listener` | Penerima menelepon IP server. Firewall UDP |
+| SRT caller | FFmpeg `-c copy` ke URL lawan | Server yang menelepon |
+| NDI | GStreamer host `ndisink` | Butuh `ndisink` dan NDI runtime di host |
+
+Preview browser tetap FFmpeg di dalam image: RTSP sumber diperkecil dan dipublish ke path MediaMTX dengan ID slot (`sdi1`, `srt1`, `ndi1`, …). Bukan gambar dari kartu atau dari proses NDI.
+
+Sinyal sumber hilang (RTSP 404): slot tidak dikosongkan. Status **No signal**, pipeline dan preview mencoba lagi. Saat sinyal kembali, status menjadi **On air**. Kunci output (`locked` di `state.json`) hanya boleh diubah grup IT.

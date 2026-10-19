@@ -4,7 +4,7 @@ Pakai dokumen ini saat melanjutkan project. Jangan menebak alamat produksi dari 
 
 ## Apa ini
 
-Pengganti NDI Core untuk lapangan CNN. Empat (atau lebih) Kiloview P3 Mini masuk lewat bonding ke KiloLink Server, lalu SRT/RTMP masuk MediaMTX. Operator menarik sumber ke dua keluaran SDI DeckLink. Halaman operator bernama **STREAM ROUTE**. Login lewat Keycloak.
+Pengganti NDI Core untuk lapangan CNN. Kiloview P3 Mini masuk lewat bonding ke KiloLink Server, lalu SRT/RTMP masuk MediaMTX. Operator menarik sumber ke keluaran. Keluaran awal adalah dua SDI DeckLink. IT bisa menambah SDI lain, SRT, atau NDI. Halaman operator bernama **STREAM ROUTE**. Login lewat Keycloak.
 
 Mesin produksi adalah HP Z420, IP `172.17.20.34`, user Linux `itcnnid`. Repo di server biasanya `/storage/kiloview`. Git: `https://github.com/bayu-cn/kiloview.git`, branch `main`. Deploy dari Windows `D:\Project\kiloview` dengan git push, lalu di server `git pull` dan Docker.
 
@@ -18,8 +18,8 @@ Keycloak **bukan** di mesin Z420. Itu layanan bersama di mesin lain, URL `https:
 | WebRTC preview | `https://webrtc-kiloview.cnn.co.id` (NPM → `:8889`, websocket nyala) |
 | UDP media WebRTC | Langsung ke Z420, bukan lewat NPM. `webrtcAdditionalHosts` di server harus `172.17.20.34` |
 | Realm / client | `kiloview` / `kiloview` (confidential, standard flow) |
-| Grup admin | `IT` — boleh ubah input |
-| Grup operator | `Transmission` — preview dan drag saja |
+| Grup admin | `IT` — boleh ubah input, menambah output, dan mengunci output |
+| Grup operator | `Transmission` — preview dan drag saja. Output terkunci tidak bisa diubah |
 | SDI 1 | DeckLink 4K Extreme, persistent ID `40604f81` |
 | SDI 2 | DeckLink 4K Extreme, persistent ID `49205acf` |
 | Standar gambar SDI | `1080i50` |
@@ -44,11 +44,11 @@ Keycloak **bukan** di mesin Z420. Itu layanan bersama di mesin lain, URL `https:
 
 | Path | Peran |
 | --- | --- |
-| `operator/app.py` | HTTP server, login, katalog sumber, pipeline SDI dan preview |
+| `operator/app.py` | HTTP server, login, katalog sumber, pipeline SDI, SRT, NDI, dan preview |
 | `operator/static/` | UI STREAM ROUTE. Bahasa Inggris |
 | `operator/config.env` | Env runtime. Hanya di server yang berlaku. Jangan di-commit |
 | `operator/docker-compose.yml` | Container operator, network host, privileged, mount host gst dan CA |
-| `operator/data/` | `state.json` (slot SDI) dan `sources.json` (katalog). Ada di server, volume `./data` |
+| `operator/data/` | `state.json` (rute dan kunci), `sources.json` (katalog), `outputs.json` (daftar output). Ada di server, volume `./data` |
 | `mediamtx/mediamtx.yml` | Path MediaMTX. Header di server harus IP Z420 |
 | `mediamtx/docker-compose.yml` | `bluenviron/mediamtx:1`, network host, yml read-only |
 | `keycloak/stream-route/` | Theme login. Dipasang dengan copy ke host Keycloak, bukan lewat image operator |
@@ -59,8 +59,15 @@ Keycloak **bukan** di mesin Z420. Itu layanan bersama di mesin lain, URL `https:
 ## Perilaku yang sudah dikunci
 
 - Sumber disimpan sebagai URL, bukan port. Skema: `srt`, `rtsp`, `rtsps`, `rtmp`, `rtmps`, `udp`, `http`, `https`. Contoh Univiso: `rtmp://IP/live/KODE?univiso_golivestream=1` (port RTMP default 1935).
-- Path ID: `[A-Za-z0-9][A-Za-z0-9_-]{0,40}`. `sdi1` dan `sdi2` terlarang sebagai ID sumber. Port lokal yang diblokir: `80`, `8090`, `8554`, `8888`, `8889`, `9997`, `1935`.
-- Audio: `1-2` stereo asli (tanpa matrix), `1-1` channel 1 ke kedua sisi, `2-2` channel 2 ke kedua sisi. Slider volume di halaman hanya untuk dengar di browser, tidak mengubah gain SDI.
+- Input punya dua arah. **Caller**: MediaMTX menelepon URL lawan. KiloLink `srt://127.0.0.1:3001?mode=listener` tetap caller. **Listener**: admin memilih port UDP. FFmpeg di container operator yang membuka port itu, lalu meneruskan MPEG-TS ke MediaMTX lewat `srt://127.0.0.1:8890?streamid=publish:<path>`. MediaMTX sendiri tidak membuka satu port SRT per input.
+- Menambah atau mengubah satu input lewat halaman memakai API MediaMTX. Container MediaMTX tidak di-restart. Input lain yang sedang tayang tidak ikut putus.
+- Path ID: `[A-Za-z0-9][A-Za-z0-9_-]{0,40}`. ID `sdiN`, `srtN`, dan `ndiN` terlarang sebagai ID sumber. Port lokal yang diblokir: `80`, `8090`, `8189`, `8554`, `8888`, `8889`, `8890`, `9997`, `1935`.
+- Audio SDI: `1-2` stereo asli (tanpa matrix), `1-1` channel 1 ke kedua sisi, `2-2` channel 2 ke kedua sisi. Slider volume di halaman hanya untuk dengar di browser, tidak mengubah gain SDI atau SRT/NDI.
+- Sinyal lapangan hilang: rute SDI tetap terpasang. Status menjadi **No signal**. Pipeline mencoba lagi. Jangan melepas sumber otomatis. Gambar kembali sendiri saat sinyal masuk lagi.
+- IT bisa mengunci output. Transmission tidak bisa menyeret, mengganti mode, mengganti audio, atau menekan Clear pada output terkunci. Listen dan volume tetap jalan. Admin tetap bisa mengubah output yang terkunci.
+- Output baru: **SDI** (kartu DeckLink yang terdeteksi; kartu yang sudah dipakai tidak bisa dipilih lagi), **SRT** caller atau listener, **NDI** (nama di jaringan). SRT dan NDI menyalin sumber apa adanya, bukan 1080i50. Mode video dan peta audio hanya berlaku untuk SDI.
+- NDI butuh plugin GStreamer `ndisink` dan NDI runtime di Z420. Kalau belum ada, kartu output menampilkan pesan itu. Preview halaman tetap bisa jalan.
+- Dua kartu awal tetap Extreme `40604f81` dan `49205acf`. Kartu baru harus sudah terlihat driver Blackmagic sebelum muncul di daftar.
 - Grup dibaca dari access token dan ID token, dari claim yang namanya mengandung `group`. Kalau user ada di grup operator dan tidak di grup admin, dia bukan admin walaupun punya realm role admin.
 - Redirect login: `https://kiloview.cnn.co.id/callback` tanpa slash. Post logout: `https://kiloview.cnn.co.id/` dengan slash.
 - Theme Keycloak 26 memakai PatternFly. Tombol mata password memakai class `stream-eye` lewat `theme.properties`. Browser meminta CSS terkompres. Salinan gzip lama bisa tertahan di depan Keycloak. `proxy_set_header Accept-Encoding ""` harus ada di **custom location** `/resources`, bukan di kotak Advanced host NPM, karena `location /` sudah punya `proxy_set_header` sendiri dan nginx tidak mewarisi yang di level server.
