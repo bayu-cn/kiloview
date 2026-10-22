@@ -18,8 +18,10 @@ const addSourceButton = document.querySelector("#add-source");
 const outputForm = document.querySelector("#output-form");
 const addOutputButton = document.querySelector("#add-output");
 const outputNote = document.querySelector("#output-note");
+const statsPanel = document.querySelector("#stats-panel");
 
 let state = null;
+let statsTarget = null;
 const players = new Map();
 
 function savedVolume(id) {
@@ -207,6 +209,88 @@ function statusText(slot) {
   return "Empty";
 }
 
+function formatRate(mbps) {
+  if (mbps == null || !Number.isFinite(Number(mbps))) return "";
+  const value = Number(mbps);
+  if (value < 1) return `${Math.round(value * 1000)} kbps`;
+  return `${value.toFixed(value >= 10 ? 1 : 2)} Mbps`;
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
+  return `${Math.round(bytes / 1e3)} KB`;
+}
+
+function statsLine(stats) {
+  if (!stats) return "";
+  const rate = formatRate(stats.bitrate);
+  if (stats.loss == null) return rate || (stats.received ? formatBytes(stats.received) : "");
+  return [rate, `loss ${Number(stats.loss).toFixed(1)}%`].filter(Boolean).join(" · ");
+}
+
+function paintStats(root, stats) {
+  const button = root.querySelector(".stats");
+  if (!button) return;
+  const line = statsLine(stats);
+  button.hidden = !line;
+  button.textContent = line;
+  button.classList.toggle("bad", !!(stats && Number(stats.loss) >= 1));
+}
+
+function statsView() {
+  if (!statsTarget || !state) return null;
+  if (statsTarget.kind === "source") {
+    const source = state.sources.find((item) => item.id === statsTarget.id);
+    if (!source) return null;
+    return {
+      title: source.label,
+      stats: source.stats,
+      note: source.mode === "listener"
+        ? "Listener loss is measured on the link after the stream reaches this server."
+        : "",
+    };
+  }
+  const slot = state.slots[statsTarget.id];
+  if (!slot) return null;
+  return {
+    title: slot.label,
+    stats: slot.stats,
+    note: slot.stats ? "These numbers are the source feeding this output." : "",
+  };
+}
+
+function renderStatsPanel() {
+  const view = statsView();
+  if (!view) {
+    closeStats();
+    return;
+  }
+  statsPanel.hidden = false;
+  document.querySelector("#stats-title").textContent = view.title;
+  const stats = view.stats || {};
+  const rows = [
+    ["Bitrate", formatRate(stats.bitrate) || "—"],
+    ["Packet loss", stats.loss == null ? "—" : `${Number(stats.loss).toFixed(2)}%`],
+    ["Received", formatBytes(stats.received)],
+    ["Sent", formatBytes(stats.sent)],
+    ["RTT", stats.rtt == null ? "—" : `${stats.rtt} ms`],
+  ];
+  document.querySelector("#stats-body").innerHTML = rows.map(([name, value]) => `<dt>${name}</dt><dd>${value}</dd>`).join("");
+  document.querySelector("#stats-note").textContent = view.note;
+}
+
+function openStats(target) {
+  statsTarget = target;
+  renderStatsPanel();
+}
+
+function closeStats() {
+  statsTarget = null;
+  if (statsPanel) statsPanel.hidden = true;
+}
+
 function shell() {
   sourcesEl.innerHTML = state.sources.map((source) => state.admin ? `
     <article class="card" data-source="${esc(source.id)}">
@@ -221,6 +305,7 @@ function shell() {
         <button type="button" data-edit="${esc(source.id)}">Edit</button>
         <span class="badge" data-badge="${source.id}"></span>
       </div>
+      <button type="button" class="stats" data-stats-source="${esc(source.id)}" hidden></button>
     </article>
   ` : `
     <article class="card" data-source="${esc(source.id)}">
@@ -230,6 +315,7 @@ function shell() {
       <div class="card-foot">
         <span class="badge" data-badge="${source.id}"></span>
       </div>
+      <button type="button" class="stats" data-stats-source="${esc(source.id)}" hidden></button>
     </article>
   `).join("");
 
@@ -255,6 +341,7 @@ function shell() {
         <span data-hint="${id}"></span>
       </div>
       <p class="status" data-status="${id}"></p>
+      <button type="button" class="stats" data-stats-slot="${id}" hidden></button>
       <div class="controls">
         <label>Video mode
           <select data-mode="${id}">
@@ -287,6 +374,10 @@ function shell() {
         const source = state.sources.find((item) => item.id === card.dataset.source);
         if (source) openEditor(source);
       });
+    }
+    const statsButton = card.querySelector(".stats");
+    if (statsButton) {
+      statsButton.addEventListener("click", () => openStats({ kind: "source", id: card.dataset.source }));
     }
   });
 
@@ -329,6 +420,10 @@ function shell() {
     slot.querySelector("[data-clear]").addEventListener("click", () => {
       save(id, { source: null });
     });
+    const statsButton = slot.querySelector(".stats");
+    if (statsButton) {
+      statsButton.addEventListener("click", () => openStats({ kind: "slot", id }));
+    }
     slot.querySelector("[data-remove]").addEventListener("click", () => {
       if (!window.confirm(`Remove ${state.slots[id].label}?`)) return;
       api(`/api/outputs/${encodeURIComponent(id)}/delete`, { method: "POST", body: "{}" })
@@ -383,6 +478,7 @@ function paint() {
         url.classList.remove("bad");
       }
     }
+    paintStats(card, source.stats);
   });
 
   Object.entries(state.slots).forEach(([id, slot]) => {
@@ -429,8 +525,10 @@ function paint() {
     const video = box.querySelector("[data-monitor]");
     hear.textContent = video.dataset.heard === "1" ? "Mute" : "Listen";
     hear.disabled = !slot.source;
+    paintStats(box, slot.stats);
   });
   syncMedia();
+  if (statsTarget) renderStatsPanel();
 }
 
 async function save(id, patch) {
@@ -739,6 +837,14 @@ outputForm.addEventListener("submit", async (event) => {
   } catch (error) {
     window.alert(error.message);
   }
+});
+
+statsPanel.addEventListener("click", (event) => {
+  if (event.target === statsPanel) closeStats();
+});
+document.querySelector("#stats-close").addEventListener("click", closeStats);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeStats();
 });
 
 tick();

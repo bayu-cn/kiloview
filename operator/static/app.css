@@ -268,6 +268,43 @@ select, button {
   padding: 8px 10px;
 }
 button { cursor: pointer; }
+button.stats {
+  justify-self: start;
+  margin: 0 12px 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: left;
+}
+button.stats.bad { color: var(--danger); }
+.stats-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.55);
+}
+.stats-panel[hidden] { display: none; }
+.stats-card {
+  width: min(420px, calc(100% - 32px));
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.stats-card dl {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 8px 12px;
+  margin: 0;
+}
+.stats-card dt { color: var(--muted); }
+.stats-card dd { margin: 0; }
 button:disabled, select:disabled { opacity: 0.5; cursor: default; }
 
 .log {

@@ -104,7 +104,16 @@
       <div id="slots" class="slots"></div>
     </section>
   </main>
-
+  <div id="stats-panel" class="stats-panel" hidden>
+    <div class="stats-card" role="dialog" aria-labelledby="stats-title">
+      <div class="slot-top">
+        <h2 id="stats-title">Statistics</h2>
+        <button type="button" id="stats-close">Close</button>
+      </div>
+      <dl id="stats-body"></dl>
+      <p class="field-note" id="stats-note"></p>
+    </div>
+  </div>
   <script src="/static/app.js"></script>
 </body>
 </html>

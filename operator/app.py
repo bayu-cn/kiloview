@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -1355,19 +1356,137 @@ def webrtc_base() -> str:
     return public.replace(":8888", ":8889").rstrip("/")
 
 
-def path_ready() -> dict[str, bool] | None:
-    url = cfg("MEDIAMTX_API", "http://127.0.0.1:9997").rstrip("/") + "/v3/paths/list"
+_rate_marks: dict[str, tuple[float, int]] = {}
+
+
+def as_int(value: object) -> int:
     try:
-        with urllib.request.urlopen(url, timeout=1.5) as response:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+def as_float(value: object) -> float | None:
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if number != number:
+        return None
+    return number
+
+
+def api_items(path: str) -> list | None:
+    url = cfg("MEDIAMTX_API", "http://127.0.0.1:9997").rstrip("/") + path
+    try:
+        with urllib.request.urlopen(url, timeout=1.2) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, urllib.error.URLError, json.JSONDecodeError, TimeoutError):
         return None
-    items = payload.get("items", payload if isinstance(payload, list) else [])
-    return {item.get("name"): bool(item.get("ready")) for item in items if isinstance(item, dict)}
+    if not isinstance(payload, dict):
+        return None
+    items = payload.get("items", [])
+    return items if isinstance(items, list) else []
+
+
+def bitrate_from_bytes(name: str, total: int) -> float | None:
+    now = time.monotonic()
+    previous = _rate_marks.get(name)
+    _rate_marks[name] = (now, total)
+    if previous is None:
+        return None
+    elapsed = now - previous[0]
+    delta = total - previous[1]
+    if elapsed < 0.5 or delta < 0:
+        return None
+    return (delta * 8) / elapsed / 1_000_000
+
+
+def loss_percent(lost: int, unique: int) -> float | None:
+    total = lost + unique
+    if total <= 0:
+        return None
+    return lost * 100 / total
+
+
+def srt_summary(conn: dict) -> dict:
+    received = as_int(conn.get("bytesReceived"))
+    sent = as_int(conn.get("bytesSent"))
+    if received >= sent:
+        loss = loss_percent(as_int(conn.get("packetsReceivedLoss")), as_int(conn.get("packetsReceivedUnique")))
+        rate = as_float(conn.get("mbpsReceiveRate"))
+    else:
+        loss = loss_percent(as_int(conn.get("packetsSendLoss")), as_int(conn.get("packetsSentUnique")))
+        rate = as_float(conn.get("mbpsSendRate"))
+    return {
+        "received": received,
+        "sent": sent,
+        "loss": loss,
+        "bitrate": rate if rate and rate > 0 else None,
+        "rtt": as_float(conn.get("msRTT")),
+    }
+
+
+def collect_stats() -> tuple[dict[str, bool], dict[str, dict]]:
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        paths_job = pool.submit(api_items, "/v3/paths/list")
+        srt_job = pool.submit(api_items, "/v3/srtconns/list")
+        rtmp_job = pool.submit(api_items, "/v3/rtmpconns/list")
+        paths = paths_job.result()
+        srts = srt_job.result() or []
+        rtmps = rtmp_job.result() or []
+    if paths is None:
+        return {}, {}
+    srt_by: dict[str, tuple[int, dict]] = {}
+    for conn in srts:
+        if not isinstance(conn, dict):
+            continue
+        name = conn.get("path")
+        if not isinstance(name, str) or not name:
+            continue
+        score = as_int(conn.get("bytesReceived")) + as_int(conn.get("bytesSent"))
+        current = srt_by.get(name)
+        if current is None or score >= current[0]:
+            srt_by[name] = (score, conn)
+    rtmp_bytes: dict[str, int] = {}
+    for conn in rtmps:
+        if not isinstance(conn, dict):
+            continue
+        name = conn.get("path")
+        if isinstance(name, str) and name:
+            rtmp_bytes[name] = rtmp_bytes.get(name, 0) + as_int(conn.get("inboundBytes") or conn.get("bytesReceived"))
+    ready: dict[str, bool] = {}
+    stats: dict[str, dict] = {}
+    for item in paths:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str):
+            continue
+        ready[name] = bool(item.get("ready") or item.get("online"))
+        inbound = as_int(item.get("inboundBytes") or item.get("bytesReceived"))
+        outbound = as_int(item.get("outboundBytes") or item.get("bytesSent"))
+        chosen = srt_by.get(name)
+        summary = srt_summary(chosen[1]) if chosen else None
+        received = summary["received"] if summary and summary["received"] else inbound or rtmp_bytes.get(name, 0)
+        sent = summary["sent"] if summary and summary["sent"] else outbound
+        bitrate = summary["bitrate"] if summary else None
+        if not bitrate:
+            bitrate = bitrate_from_bytes(name, received or sent)
+        if not received and not sent and bitrate is None:
+            continue
+        stats[name] = {
+            "bitrate": None if bitrate is None else round(float(bitrate), 2),
+            "loss": None if summary is None or summary["loss"] is None else round(float(summary["loss"]), 2),
+            "received": received,
+            "sent": sent,
+            "rtt": None if summary is None or summary["rtt"] is None else round(float(summary["rtt"]), 1),
+        }
+    return ready, stats
 
 
 def snapshot() -> dict:
-    ready = path_ready() or {}
+    ready, stats = collect_stats()
     with lock:
         slots_copy = {slot_id: dict(slot) for slot_id, slot in state.items()}
         runs_copy = {}
@@ -1408,6 +1527,7 @@ def snapshot() -> dict:
             "error": run["error"] if run["status"] == "error" else None,
             "whep": f"{web}/{slot_id}/whep" if slot["source"] else None,
             "previewError": run["preview_error"],
+            "stats": stats.get(slot["source"]) if slot["source"] else None,
         }
     return {
         "auth": auth_enabled(),
@@ -1421,6 +1541,7 @@ def snapshot() -> dict:
                 "port": source.get("port"),
                 "ingestError": (listeners.get(source["id"]) or {}).get("error"),
                 "ready": bool(ready.get(source["id"])),
+                "stats": stats.get(source["id"]),
                 "whep": f"{web}/{urllib.parse.quote(source['id'])}/whep",
                 "routedTo": routed.get(source["id"], []),
             }
