@@ -244,6 +244,9 @@ SOURCE_SCHEMES = {"srt", "rtsp", "rtsps", "rtmp", "rtmps", "udp", "http", "https
 LOCAL_HOSTS = {"", "0.0.0.0", "127.0.0.1", "localhost", "::1"}
 BLOCKED_PORTS = {80, 8090, 8189, 8554, 8888, 8889, 8890, 9997, 1935}
 listeners: dict[str, dict] = {}
+srtla_receivers: list[dict] = []
+srtla_runs: dict[str, dict] = {}
+SRTLA_BIN = "/usr/local/bin/srtla_rec"
 
 
 def legacy_listener_url(port: int) -> str:
@@ -716,6 +719,11 @@ def listener_args(item: dict) -> list[str] | None:
     port = int(item["port"])
     # vMix mengirim MPEG-TS. Disalin ke RTSP, SPS/PPS hilang dan MediaMTX
     # tetap "stream not found". Teruskan TS asli ke server SRT MediaMTX.
+    # Receiver SRTLA menaikkan latency dan lossmaxttl: paket bonding datang
+    # tidak berurutan, dan NAK yang terlalu cepat menjatuhkan link ke satu jalur.
+    tuned = srtla_tune_for_source(item["id"])
+    latency = int(tuned["latencyMs"]) * 1000 if tuned else 120000
+    reorder = f"&lossmaxttl={int(tuned['lossmaxttl'])}" if tuned else ""
     target = cfg("MEDIAMTX_SRT", "srt://127.0.0.1:8890").rstrip("/")
     publish = f"{target}?streamid=publish:{item['id']}&pkt_size=1316"
     return [
@@ -724,7 +732,7 @@ def listener_args(item: dict) -> list[str] | None:
         "-fflags", "nobuffer",
         "-analyzeduration", "2000000",
         "-probesize", "2000000",
-        "-i", f"srt://0.0.0.0:{port}?mode=listener&transtype=live&latency=120000",
+        "-i", f"srt://0.0.0.0:{port}?mode=listener&transtype=live&latency={latency}{reorder}",
         "-c", "copy",
         "-f", "mpegts",
         publish,
@@ -809,7 +817,7 @@ def sync_listener(previous: dict | None, item: dict) -> str | None:
     return None
 
 
-def occupied_ports(except_id: str | None = None) -> set[int]:
+def occupied_ports(except_id: str | None = None, except_srtla: str | None = None) -> set[int]:
     found: set[int] = set()
     for other in catalog:
         if other["id"] == except_id:
@@ -822,7 +830,528 @@ def occupied_ports(except_id: str | None = None) -> set[int]:
     for meta in SLOTS.values():
         if meta.get("kind") == "srt" and meta.get("srt_mode") == "listener" and meta.get("port"):
             found.add(int(meta["port"]))
+    for item in srtla_receivers:
+        if item["id"] == except_srtla:
+            continue
+        found.add(int(item["port"]))
+        found.add(int(item["metricsPort"]))
     return found
+
+
+PROM_LINE = re.compile(
+    r"^([A-Za-z_:][A-Za-z0-9_:]*)(?:\{([^}]*)\})?\s+([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)"
+)
+PROM_LABEL = re.compile(r'([A-Za-z_][A-Za-z0-9_]*)="((?:\\.|[^"\\])*)"')
+LINK_FIELDS = {
+    "srtla_conn_bytes_received_total": "bytes",
+    "srtla_conn_packets_received_total": "packets",
+    "srtla_conn_packets_lost_total": "lost",
+    "srtla_conn_weight_percent": "weight",
+    "srtla_conn_error_points": "errors",
+    "srtla_conn_rtt_ms": "rtt",
+    "srtla_conn_idle_seconds": "idle",
+}
+
+
+def srtla_path() -> Path:
+    return STATE_PATH.parent / "srtla.json"
+
+
+def srtla_binary() -> Path | None:
+    path = Path(cfg("SRTLA_REC", SRTLA_BIN))
+    return path if path.is_file() else None
+
+
+def srtla_advertise() -> str:
+    host = cfg("SRTLA_PUBLIC_HOST")
+    if not host or len(host) > 253 or any(char.isspace() or char in "/\\" for char in host):
+        return ""
+    return host
+
+
+def srtla_tune_for_source(source_id: str) -> dict | None:
+    return next((item for item in srtla_receivers if item["sourceId"] == source_id), None)
+
+
+def save_srtla() -> None:
+    path = srtla_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(srtla_receivers, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def load_srtla() -> None:
+    global srtla_receivers
+    path = srtla_path()
+    if not path.exists():
+        srtla_receivers = []
+        return
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        srtla_receivers = []
+        return
+    loaded = []
+    seen_ids: set[str] = set()
+    seen_ports: set[int] = set()
+    seen_sources: set[str] = set()
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        receiver_id = str(item.get("id") or "")
+        if not re.fullmatch(r"srtla\d+", receiver_id) or receiver_id in seen_ids:
+            continue
+        label = str(item.get("label") or receiver_id).strip()
+        port = listen_port(item)
+        metrics = listen_port({"port": item.get("metricsPort")})
+        source_id = str(item.get("sourceId") or "").strip()
+        try:
+            latency = int(item.get("latencyMs") or 2000)
+            window = int(item.get("lossmaxttl") or 40)
+        except (TypeError, ValueError):
+            continue
+        if (
+            port is None
+            or metrics is None
+            or not source_id
+            or not label
+            or len(label) > 48
+            or not 120 <= latency <= 8000
+            or not 10 <= window <= 200
+            or port == metrics
+            or port in seen_ports
+            or metrics in seen_ports
+            or source_id in seen_sources
+        ):
+            continue
+        seen_ids.add(receiver_id)
+        seen_ports.add(port)
+        seen_ports.add(metrics)
+        seen_sources.add(source_id)
+        loaded.append({
+            "id": receiver_id,
+            "label": label,
+            "port": port,
+            "sourceId": source_id,
+            "latencyMs": latency,
+            "lossmaxttl": window,
+            "metricsPort": metrics,
+        })
+    srtla_receivers = loaded
+
+
+def next_srtla_id() -> str:
+    used = {item["id"] for item in srtla_receivers}
+    number = 1
+    while f"srtla{number}" in used:
+        number += 1
+    return f"srtla{number}"
+
+
+def next_metrics_port(except_id: str | None = None, avoid: set[int] | None = None) -> int:
+    used = occupied_ports(except_srtla=except_id)
+    if avoid:
+        used |= avoid
+    port = 39100
+    while port in used or port in BLOCKED_PORTS:
+        port += 1
+        if port > 39250:
+            raise ValueError("No free status port for SRTLA.")
+    return port
+
+
+def normalize_srtla(payload: dict, current: dict | None = None) -> dict:
+    label = str(payload.get("label") or "").strip()
+    if not label or len(label) > 48:
+        raise ValueError("Name is invalid.")
+    port = listen_port(payload)
+    if port is None:
+        raise ValueError("SRTLA port is invalid.")
+    source_id = str(payload.get("sourceId") or "").strip()
+    source = next((item for item in catalog if item["id"] == source_id), None)
+    if source is None or source.get("mode") != "listener":
+        raise ValueError("Choose a listener input. Add one under Inputs first.")
+    try:
+        latency = int(payload.get("latencyMs") if payload.get("latencyMs") not in (None, "") else 2000)
+        window = int(payload.get("lossmaxttl") if payload.get("lossmaxttl") not in (None, "") else 40)
+    except (TypeError, ValueError):
+        raise ValueError("Latency or reorder window is invalid.")
+    if not 120 <= latency <= 8000:
+        raise ValueError("SRT latency must be between 120 and 8000 ms.")
+    if not 10 <= window <= 200:
+        raise ValueError("Reorder window must be between 10 and 200.")
+    receiver_id = current["id"] if current else next_srtla_id()
+    if port == int(source["port"]):
+        raise ValueError("The SRTLA port and the listener input port must be different.")
+    if port in BLOCKED_PORTS or port in occupied_ports(except_srtla=receiver_id):
+        raise ValueError(f"Port {port} is already used.")
+    if any(other["sourceId"] == source_id and other["id"] != receiver_id for other in srtla_receivers):
+        raise ValueError("That listener input already has an SRTLA receiver.")
+    metrics = int(current["metricsPort"]) if current else 0
+    taken = occupied_ports(except_srtla=receiver_id)
+    if not metrics or metrics == port or metrics in BLOCKED_PORTS or metrics in taken:
+        metrics = next_metrics_port(receiver_id, {port})
+    return {
+        "id": receiver_id,
+        "label": label,
+        "port": port,
+        "sourceId": source_id,
+        "latencyMs": latency,
+        "lossmaxttl": window,
+        "metricsPort": metrics,
+    }
+
+
+def stop_srtla(receiver_id: str) -> None:
+    run = srtla_runs.get(receiver_id)
+    if not run:
+        return
+    run["generation"] += 1
+    proc = run.get("proc")
+    run["proc"] = None
+    if proc is not None and proc.poll() is None:
+        kill_process(proc)
+    srtla_runs.pop(receiver_id, None)
+
+
+def srtla_args(item: dict, source_port: int) -> list[str] | None:
+    binary = srtla_binary()
+    if binary is None:
+        return None
+    return [
+        str(binary),
+        "--srtla_port", str(int(item["port"])),
+        "--srt_hostname", "127.0.0.1",
+        "--srt_port", str(source_port),
+        "--metrics_port", str(int(item["metricsPort"])),
+        "--metrics_bind", "127.0.0.1",
+        "--metrics_detail",
+        "--log_level", "info",
+    ]
+
+
+def start_srtla(receiver_id: str) -> str | None:
+    item = next((entry for entry in srtla_receivers if entry["id"] == receiver_id), None)
+    if item is None:
+        stop_srtla(receiver_id)
+        return None
+    run = srtla_runs.setdefault(receiver_id, {"proc": None, "generation": 0, "error": None, "sample": None})
+    proc = run.get("proc")
+    if proc is not None and proc.poll() is None:
+        kill_process(proc)
+    run["proc"] = None
+    run["sample"] = None
+    run["generation"] += 1
+    generation = run["generation"]
+    source = next(
+        (entry for entry in catalog if entry["id"] == item["sourceId"] and entry.get("mode") == "listener"),
+        None,
+    )
+    if source is None:
+        run["error"] = "The listener input this receiver feeds is missing."
+        return run["error"]
+    args = srtla_args(item, int(source["port"]))
+    if args is None:
+        run["error"] = "srtla_rec is not in this image. Rebuild the operator container."
+        return run["error"]
+    LOG_DIR.mkdir(exist_ok=True)
+    log_path = LOG_DIR / f"{receiver_id}-srtla.log"
+    log = open(log_path, "w", encoding="utf-8")
+    log.write(" ".join(args) + "\n\n")
+    log.flush()
+    try:
+        proc = subprocess.Popen(
+            args,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=os.name == "posix",
+        )
+    except OSError as exc:
+        log.write(f"\nsrtla_rec failed to start: {exc}\n")
+        log.close()
+        run["error"] = str(exc)
+        return str(exc)
+    log.close()
+    run["proc"] = proc
+    run["error"] = None
+    run["started"] = time.monotonic()
+    threading.Thread(target=watch_srtla, args=(receiver_id, generation, proc), daemon=True).start()
+    return None
+
+
+def watch_srtla(receiver_id: str, generation: int, proc: subprocess.Popen) -> None:
+    proc.wait()
+    with lock:
+        run = srtla_runs.get(receiver_id)
+        if not run or run["generation"] != generation or run.get("proc") is not proc:
+            return
+        run["proc"] = None
+        lived = time.monotonic() - float(run.get("started") or 0)
+        if lived < 3:
+            run["error"] = useful_log(receiver_id, "-srtla") or f"srtla_rec stopped (code {proc.returncode})"
+        else:
+            run["error"] = None
+        threading.Thread(target=restart_srtla_later, args=(receiver_id, generation), daemon=True).start()
+
+
+def restart_srtla_later(receiver_id: str, generation: int) -> None:
+    time.sleep(2)
+    with lock:
+        run = srtla_runs.get(receiver_id)
+        if not run or run["generation"] != generation:
+            return
+        if not any(item["id"] == receiver_id for item in srtla_receivers):
+            return
+        start_srtla(receiver_id)
+
+
+def restart_listener_if_present(source_id: str) -> str | None:
+    if any(entry["id"] == source_id and entry.get("mode") == "listener" for entry in catalog):
+        return start_listener(source_id)
+    return None
+
+
+def store_srtla(receiver_id: str | None, payload: dict) -> str | None:
+    with lock:
+        previous = None
+        if receiver_id is not None:
+            previous = next((entry for entry in srtla_receivers if entry["id"] == receiver_id), None)
+            if previous is None:
+                raise ValueError("Unknown SRTLA receiver.")
+        item = normalize_srtla(payload, previous)
+        if previous is None:
+            srtla_receivers.append(item)
+        else:
+            for index, other in enumerate(srtla_receivers):
+                if other["id"] == item["id"]:
+                    srtla_receivers[index] = item
+                    break
+        save_srtla()
+        old_source = previous["sourceId"] if previous else None
+        changed = previous is None or any(
+            previous[key] != item[key] for key in ("port", "sourceId", "metricsPort", "latencyMs", "lossmaxttl")
+        )
+        listener_error = None
+        if changed and old_source and old_source != item["sourceId"]:
+            listener_error = restart_listener_if_present(old_source)
+        if changed:
+            current_error = restart_listener_if_present(item["sourceId"])
+            listener_error = listener_error or current_error
+            srtla_error = start_srtla(item["id"])
+        else:
+            srtla_error = None
+    return listener_error or srtla_error
+
+
+def remove_srtla(receiver_id: str) -> None:
+    with lock:
+        item = next((entry for entry in srtla_receivers if entry["id"] == receiver_id), None)
+        if item is None:
+            raise ValueError("Unknown SRTLA receiver.")
+        stop_srtla(receiver_id)
+        srtla_receivers[:] = [entry for entry in srtla_receivers if entry["id"] != receiver_id]
+        save_srtla()
+        restart_listener_if_present(item["sourceId"])
+
+
+def scrape_metrics(port: int) -> str | None:
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=0.4) as response:
+            return response.read().decode("utf-8", errors="replace")
+    except (OSError, urllib.error.URLError, TimeoutError):
+        return None
+
+
+def parse_metrics(text: str) -> dict:
+    plain: dict[str, float] = {}
+    labeled: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        match = PROM_LINE.match(line)
+        if not match:
+            continue
+        name, labels_raw, value_raw = match.groups()
+        try:
+            value = float(value_raw)
+        except ValueError:
+            continue
+        if not labels_raw:
+            plain[name] = value
+            continue
+        labels = tuple(sorted(PROM_LABEL.findall(labels_raw)))
+        labeled[(name, labels)] = value
+
+    def labeled_sum(name: str) -> float:
+        return sum(value for (metric, _), value in labeled.items() if metric == name)
+
+    def labeled_reason(name: str, reason: str) -> float:
+        total = 0.0
+        for (metric, labels), value in labeled.items():
+            if metric == name and dict(labels).get("reason") == reason:
+                total += value
+        return total
+
+    links: dict[str, dict] = {}
+    for (name, labels), value in labeled.items():
+        field = LINK_FIELDS.get(name)
+        if not field:
+            continue
+        remote = dict(labels).get("remote") or ""
+        if not remote:
+            continue
+        row = links.setdefault(remote, {"remote": remote})
+        row[field] = value
+    link_rows = []
+    for remote in sorted(links):
+        row = links[remote]
+        packets = row.get("packets") or 0
+        lost = row.get("lost") or 0
+        total = packets + lost
+        link_rows.append({
+            "remote": remote,
+            "bytes": int(row.get("bytes") or 0),
+            "packets": int(packets),
+            "lost": int(lost),
+            "loss": (lost / total * 100) if total else None,
+            "weight": int(row.get("weight") or 0),
+            "errors": int(row.get("errors") or 0),
+            "rtt": int(row.get("rtt") or 0),
+            "idle": int(row.get("idle") or 0),
+            "bitrate": None,
+        })
+    return {
+        "groups": int(plain.get("srtla_groups") or 0),
+        "established": int(plain.get("srtla_groups_established") or 0),
+        "connections": int(plain.get("srtla_connections") or 0),
+        "packetsReceived": int(plain.get("srtla_packets_received_total") or 0),
+        "packetsForwarded": int(plain.get("srtla_forwarded_packets_total") or 0),
+        "bytesReceived": int(plain.get("srtla_bytes_received_total") or 0),
+        "forwardDropped": int(plain.get("srtla_forward_dropped_total") or 0),
+        "forwardErrors": int(plain.get("srtla_forward_errors_total") or 0),
+        "rejected": int(
+            labeled_sum("srtla_group_registrations_rejected_total")
+            + labeled_sum("srtla_conn_registrations_rejected_total")
+        ),
+        "removedIdle": int(labeled_reason("srtla_groups_removed_total", "idle_timeout")),
+        "removedSrt": int(labeled_reason("srtla_groups_removed_total", "srt_error")),
+        "authFailures": int(plain.get("srtla_auth_failures_total") or 0),
+        "bitrate": None,
+        "links": link_rows,
+    }
+
+
+def apply_rates(previous: dict | None, parsed: dict) -> dict:
+    now = time.monotonic()
+    sample = {
+        "at": now,
+        "bytes": parsed["bytesReceived"],
+        "links": {link["remote"]: link["bytes"] for link in parsed["links"]},
+    }
+    if not previous:
+        return sample
+    elapsed = now - float(previous.get("at") or 0)
+    if elapsed <= 0:
+        return sample
+    parsed["bitrate"] = max(0, parsed["bytesReceived"] - int(previous.get("bytes") or 0)) * 8 / elapsed / 1_000_000
+    old_links = previous.get("links") or {}
+    for link in parsed["links"]:
+        old = old_links.get(link["remote"])
+        if old is None:
+            continue
+        link["bitrate"] = max(0, link["bytes"] - int(old)) * 8 / elapsed / 1_000_000
+    return sample
+
+
+def srtla_notes(running: bool, error: str | None, listener_error: str | None, parsed: dict | None) -> list[str]:
+    notes = []
+    if error:
+        notes.append(error)
+    elif not running:
+        notes.append("Receiver is not running.")
+    elif parsed is None:
+        notes.append("Process is up, but the status port has not answered yet.")
+    else:
+        if parsed["established"] <= 0:
+            notes.append("No SRT session yet. The encoder has not connected, or the listener input refused it.")
+        elif parsed["connections"] < 2:
+            notes.append("One link only. Bonding starts when a second link registers.")
+        if parsed["forwardErrors"]:
+            notes.append("Forwarding to the listener failed. The listener may be down or its port changed.")
+        if parsed["forwardDropped"]:
+            notes.append("Some packets hit a full send buffer. SRT can recover them if the latency window is long enough.")
+        if parsed["rejected"]:
+            notes.append(f"Registrations rejected: {parsed['rejected']}.")
+        if parsed["removedSrt"] or parsed["removedIdle"]:
+            notes.append(
+                f"Groups closed — SRT error {parsed['removedSrt']}, idle timeout {parsed['removedIdle']}."
+            )
+        if parsed["authFailures"]:
+            notes.append(f"SRT auth failures: {parsed['authFailures']}.")
+    if listener_error:
+        notes.append(f"Listener input: {listener_error}")
+    return notes
+
+
+def srtla_public() -> dict:
+    with lock:
+        items = [dict(item) for item in srtla_receivers]
+        runs = {}
+        for item in items:
+            run = srtla_runs.get(item["id"]) or {}
+            proc = run.get("proc")
+            runs[item["id"]] = {
+                "running": proc is not None and proc.poll() is None,
+                "started": run.get("started"),
+                "error": run.get("error"),
+                "sample": run.get("sample"),
+            }
+        sources = {entry["id"]: entry for entry in catalog}
+        listener_errors = {
+            source_id: (listeners.get(source_id) or {}).get("error")
+            for source_id in {item["sourceId"] for item in items}
+        }
+    host = srtla_advertise()
+    receivers = []
+    samples = {}
+    for item in items:
+        run = runs[item["id"]]
+        parsed = None
+        if run["running"]:
+            text = scrape_metrics(int(item["metricsPort"]))
+            if text:
+                parsed = parse_metrics(text)
+                samples[item["id"]] = apply_rates(run["sample"], parsed)
+        source = sources.get(item["sourceId"]) or {}
+        uptime = None
+        if run["running"] and run["started"]:
+            uptime = int(time.monotonic() - float(run["started"]))
+        sender = f"srtla://{host}:{item['port']}" if host else ""
+        receivers.append({
+            "id": item["id"],
+            "label": item["label"],
+            "port": item["port"],
+            "sourceId": item["sourceId"],
+            "sourceLabel": source.get("label") or item["sourceId"],
+            "sourcePort": source.get("port"),
+            "latencyMs": item["latencyMs"],
+            "lossmaxttl": item["lossmaxttl"],
+            "running": run["running"],
+            "uptime": uptime,
+            "sender": sender,
+            "log": read_log(item["id"], "-srtla", 40),
+            "stats": parsed,
+            "notes": srtla_notes(run["running"], run["error"], listener_errors.get(item["sourceId"]), parsed),
+        })
+    if samples:
+        with lock:
+            for receiver_id, sample in samples.items():
+                current = srtla_runs.get(receiver_id)
+                if current is not None:
+                    current["sample"] = sample
+    return {"receivers": receivers, "advertise": host, "binary": srtla_binary() is not None}
 
 
 def validate_source(payload: dict, current_id: str | None = None) -> dict:
@@ -1344,6 +1873,8 @@ def stop_all() -> None:
                 kill_process(proc)
             if preview is not None:
                 kill_process(preview)
+        for receiver_id in list(srtla_runs):
+            stop_srtla(receiver_id)
         for source_id in list(listeners):
             stop_listener(source_id)
 
@@ -1715,6 +2246,13 @@ def update_source(source_id: str, payload: dict) -> str | None:
         if previous is None:
             raise ValueError("Unknown source.")
         item = validate_source(payload, current_id=source_id)
+        bound = srtla_tune_for_source(source_id)
+        if bound and item.get("mode") != "listener":
+            raise ValueError(
+                f"SRTLA receiver {bound['label']} feeds this input. Remove it before switching away from listener."
+            )
+        port_changed = previous.get("port") != item.get("port")
+        bound_id = bound["id"] if bound else None
         for index, other in enumerate(catalog):
             if other["id"] == source_id:
                 catalog[index] = item
@@ -1727,13 +2265,17 @@ def update_source(source_id: str, payload: dict) -> str | None:
         warning = publish_source(item, replace=True)
     with lock:
         listen_error = sync_listener(previous, item)
-    return warning or listen_error
+        srtla_error = start_srtla(bound_id) if port_changed and bound_id else None
+    return warning or listen_error or srtla_error
 
 
 def delete_source(source_id: str) -> None:
     with lock:
         if any(slot["source"] == source_id for slot in state.values()):
             raise ValueError("Clear this source from SDI before deleting it.")
+        bound = srtla_tune_for_source(source_id)
+        if bound:
+            raise ValueError(f"SRTLA receiver {bound['label']} still feeds this input. Remove that receiver first.")
         if source_id not in sources():
             raise ValueError("Unknown source.")
         stop_listener(source_id)
@@ -1846,6 +2388,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/decklink":
             self.handle_decklink()
             return
+        if path == "/api/srtla":
+            self.handle_srtla_get()
+            return
         self.send_json(404, {"error": "Not found."})
 
     def do_POST(self) -> None:
@@ -1855,6 +2400,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/outputs" or path.startswith("/api/outputs/"):
             self.handle_output(path)
+            return
+        if path == "/api/srtla" or path.startswith("/api/srtla/"):
+            self.handle_srtla(path)
             return
         prefix = "/api/slots/"
         if not path.startswith(prefix):
@@ -1993,6 +2541,51 @@ class Handler(BaseHTTPRequestHandler):
             body["warning"] = warning
         self.send_json(200, body)
 
+    def require_admin(self) -> dict | None:
+        session = current_session(self)
+        if session is None:
+            self.send_json(401, {"error": "Login required."})
+            return None
+        if not session.get("admin"):
+            self.send_json(403, {"error": "Only the IT group can open SRTLA."})
+            return None
+        return session
+
+    def handle_srtla_get(self) -> None:
+        if self.require_admin() is None:
+            return
+        self.send_json(200, srtla_public())
+
+    def handle_srtla(self, path: str) -> None:
+        if self.require_admin() is None:
+            return
+        try:
+            if path == "/api/srtla":
+                warning = store_srtla(None, self.read_json())
+            elif path.endswith("/delete"):
+                receiver_id = urllib.parse.unquote(path[len("/api/srtla/"):-len("/delete")])
+                remove_srtla(receiver_id)
+                warning = None
+            elif path.endswith("/restart"):
+                receiver_id = urllib.parse.unquote(path[len("/api/srtla/"):-len("/restart")])
+                with lock:
+                    if not any(item["id"] == receiver_id for item in srtla_receivers):
+                        raise ValueError("Unknown SRTLA receiver.")
+                    warning = start_srtla(receiver_id)
+            else:
+                receiver_id = urllib.parse.unquote(path[len("/api/srtla/"):]).strip("/")
+                warning = store_srtla(receiver_id, self.read_json())
+        except ValueError as exc:
+            self.send_json(400, {"error": str(exc)})
+            return
+        except OSError as exc:
+            self.send_json(500, {"error": f"Could not save the SRTLA receiver: {exc}"})
+            return
+        body = srtla_public()
+        if warning:
+            body["warning"] = warning
+        self.send_json(200, body)
+
     def handle_login(self) -> None:
         if not auth_enabled():
             self.redirect("/")
@@ -2112,6 +2705,7 @@ def main() -> None:
     apply_paths()
     load_outputs()
     load_catalog()
+    load_srtla()
     try:
         write_mediamtx()
     except OSError as exc:
@@ -2122,6 +2716,8 @@ def main() -> None:
         for item in catalog:
             if item.get("mode") == "listener":
                 start_listener(item["id"])
+        for item in srtla_receivers:
+            start_srtla(item["id"])
     state = load_state()
     with lock:
         for slot_id, slot in state.items():

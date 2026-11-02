@@ -36,7 +36,7 @@ Transmission tidak bisa menambah, mengubah, atau menghapus input dan output. Itu
 
 ## IT admin
 
-Akun harus ada di grup Keycloak `IT`. Di halaman ada **Add input** dan **Add output**. Kartu input menampilkan display name, path ID, serta URL atau port.
+Akun harus ada di grup Keycloak `IT`. Di header ada tab **Route** dan **SRTLA**. Transmission hanya melihat Route. Di Route ada **Add input** dan **Add output**. Kartu input menampilkan display name, path ID, serta URL atau port.
 
 ### Menambah input
 
@@ -70,6 +70,46 @@ Preview langsung MediaMTX, ganti `PATH` dengan Path ID: `http://172.17.20.34:888
 **Lock** pada sebuah output membuat Transmission tidak bisa mengubahnya. **Unlock** mengembalikan. **Remove** hanya bisa saat output sudah di-Clear.
 
 Mode video dan peta audio hanya untuk SDI. SRT dan NDI mengirim sumber asli.
+
+### SRTLA (bonding encoder)
+
+Tab **SRTLA** hanya muncul untuk grup `IT`. Dipakai kalau encoder lapangan mengirim **SRTLA** (bukan SRT biasa ke port listener).
+
+1. Buat dulu **input Listener** di tab Route (misalnya path `bond-a`, listen port `9101`). Port listener dan port SRTLA publik **harus beda**.
+2. Buka tab **SRTLA** → **Add receiver**.
+3. Isi **Public UDP port** — ini yang dibuka di firewall dan yang dipanggil encoder (bukan port listener).
+4. Pilih **Listener input** yang barusan dibuat.
+5. **SRT latency** dan **Reorder window** — mulai dari `2000 ms` dan `40`. Nilai ini juga diterapkan ke FFmpeg listener untuk input itu (bonding butuh jendela lebih lebar).
+6. **Save**. Operator menjalankan `srtla_rec` dan me-restart listener terkait.
+
+Di `operator/config.env` server, set `SRTLA_PUBLIC_HOST=172.17.20.34` (atau hostname publik) supaya form menampilkan URL encoder lengkap.
+
+Encoder harus MPEG-TS **packet size 1316**. Bonding terlihat di kartu receiver (badge **bonded**) kalau ada **dua link** atau lebih dan sesi SRT sudah accepted.
+
+Troubleshooting dari dashboard:
+
+| Yang terlihat | Arti singkat |
+| --- | --- |
+| **waiting** | `srtla_rec` jalan, belum ada sesi SRT ke listener |
+| **one link** | Satu uplink saja; bonding butuh link kedua |
+| **bonded** | Sesi SRT OK + ≥2 link |
+| Catatan merah di kartu | Penjelan otomatis (listener down, forward error, registrasi ditolak, dll.) |
+| Tabel **Link** | Per IP uplink: rate, loss, RTT, weight, idle, errors |
+| Blok log di bawah kartu | Tail `srtla_rec` |
+
+**Restart** mengulang proses receiver. **Remove** menghapus receiver; input listener tetap ada.
+
+Setelah mengubah tab SRTLA atau image operator: `cd /storage/kiloview/operator && docker compose up -d --build` (image harus berisi `srtla_rec`; kalau kartu bilang binary tidak ada, rebuild wajib).
+
+Cek cepat di shell:
+
+```bash
+ss -ulpn | grep <port-publik-srtla>
+docker exec operator sh -c 'tail -n 40 /data/logs/srtla1-srtla.log'
+curl -s http://127.0.0.1:39100/metrics | head
+```
+
+Ganti `39100` dengan metrics port receiver (disimpan di `srtla.json`, tidak ditampilkan di UI).
 
 ### Akun
 

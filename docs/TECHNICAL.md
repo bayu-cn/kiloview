@@ -37,6 +37,19 @@ pengirim luar  -->  srt://172.17.20.34:<port>  (FFmpeg di operator, mode listene
                             -->  path MediaMTX
 ```
 
+**SRTLA** (bonding beberapa uplink encoder) memakai `srtla_rec` di image operator. Bukan skema URL MediaMTX. Satu receiver SRTLA = satu port UDP publik + satu input listener yang sudah ada:
+
+```text
+encoder SRTLA (2+ link)  -->  UDP publik :<srtla-port>  (srtla_rec)
+                                 -->  SRT caller ke 127.0.0.1:<port listener input>
+                                       -->  FFmpeg listener (latency/reorder diset dari dashboard)
+                                             -->  MediaMTX  -->  SDI / SRT / NDI keluar
+```
+
+Konfigurasi receiver disimpan di `data/srtla.json`. Proses `srtla_rec` mengekspor metrik Prometheus di `127.0.0.1:<metricsPort>` (rentang otomatis sekitar `39100+`). Halaman **SRTLA** di operator (hanya grup IT) menambah/mengedit receiver, menampilkan status per link, bitrate, loss, RTT, catatan troubleshooting, dan tail log `/data/logs/srtlaN-srtla.log`. API: `GET/POST /api/srtla`, `POST /api/srtla/{id}/restart`, `POST /api/srtla/{id}/delete` — semua membutuhkan sesi admin (grup `IT`).
+
+Env opsional di `config.env`: `SRTLA_PUBLIC_HOST` (IP atau hostname yang ditampilkan ke encoder, misalnya `172.17.20.34`), `SRTLA_REC` (default `/usr/local/bin/srtla_rec`).
+
 Isi yang diteruskan adalah MPEG-TS asli. Menyalin ke RTSP membuat MediaMTX tetap `stream not found` karena SPS/PPS hilang. Container MediaMTX tidak di-restart saat input baru ditambah. Port listener itu harus dibuka di firewall host sebagai UDP. `ports:` di Compose tidak dipakai karena kedua container `network_mode: host`.
 
 Keluaran SRT dan NDI juga proses terpisah di operator, membaca RTSP sumber yang sama. SRT listener membuka port UDP yang dipilih IT. SRT caller menelepon URL lawan. Keduanya `-c copy`. NDI memakai GStreamer host (`ndisink` + `ndisinkcombiner`) dan mengirim video UYVY plus audio F32LE. Itu bukan format 1080i50 kabel SDI.
@@ -68,6 +81,7 @@ Operator adalah Python stdlib (`ThreadingHTTPServer`), bukan framework web. Tiga
 | `state.json` | Sumber, mode video, peta audio, dan kunci tiap output |
 | `sources.json` | Katalog input: nama, path, caller/listener, URL atau port |
 | `outputs.json` | Daftar output: SDI (persistent ID), SRT (arah dan port/URL), NDI (nama) |
+| `srtla.json` | Receiver SRTLA: port publik, `sourceId` listener, `latencyMs`, `lossmaxttl`, `metricsPort` |
 
 Dua SDI awal diisi dari `SDI1_PERSISTENT_ID` dan `SDI2_PERSISTENT_ID` hanya saat `outputs.json` belum ada. Setelah file itu ada, daftar output mengikuti file, bukan env.
 

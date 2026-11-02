@@ -19,8 +19,17 @@ const outputForm = document.querySelector("#output-form");
 const addOutputButton = document.querySelector("#add-output");
 const outputNote = document.querySelector("#output-note");
 const statsPanel = document.querySelector("#stats-panel");
+const viewsEl = document.querySelector("#views");
+const srtlaList = document.querySelector("#srtla-list");
+const srtlaForm = document.querySelector("#srtla-form");
+const srtlaEmpty = document.querySelector("#srtla-empty");
+const srtlaBinary = document.querySelector("#srtla-binary");
+const srtlaFormNote = document.querySelector("#srtla-form-note");
 
 let state = null;
+let srtlaState = null;
+let srtlaKey = "";
+let srtlaGen = 0;
 let statsTarget = null;
 const players = new Map();
 
@@ -551,10 +560,204 @@ function accountLabel(next) {
   return `${next.user} · ${next.group || (next.admin ? "IT" : "operator")}`;
 }
 
+function formatUptime(seconds) {
+  if (seconds == null) return "down";
+  const total = Math.max(0, Number(seconds) || 0);
+  const hours = Math.floor(total / 3600);
+  const mins = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  if (hours) return `${hours}h ${mins}m`;
+  if (mins) return `${mins}m ${secs}s`;
+  return `${secs}s`;
+}
+
+function showView(name) {
+  const next = name === "srtla" && state && state.admin ? "srtla" : "route";
+  document.body.classList.toggle("view-srtla", next === "srtla");
+  document.querySelector("#view-route").setAttribute("aria-pressed", next === "route" ? "true" : "false");
+  document.querySelector("#view-srtla").setAttribute("aria-pressed", next === "srtla" ? "true" : "false");
+  if (next === "srtla") {
+    if (location.hash !== "#srtla") history.replaceState(null, "", "#srtla");
+  } else if (location.hash === "#srtla") {
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+}
+
+function srtlaBadge(item) {
+  if (!item.running) return ["", "down"];
+  const stats = item.stats;
+  if (stats && stats.established > 0 && stats.connections >= 2) return ["live", "bonded"];
+  if (stats && stats.established > 0) return ["warn", "one link"];
+  return ["", "waiting"];
+}
+
+function srtlaFacts(item) {
+  const stats = item.stats;
+  const rows = [
+    ["Process", item.running ? `Up ${formatUptime(item.uptime)}` : "Down"],
+    ["Public port", item.sender || `UDP ${item.port}`],
+    ["Feeds", `${item.sourceLabel} · listener UDP ${item.sourcePort ?? "—"}`],
+    ["SRT latency", `${item.latencyMs} ms · reorder ${item.lossmaxttl}`],
+  ];
+  if (stats) {
+    rows.push(
+      ["Links", String(stats.connections)],
+      ["SRT session", stats.established > 0 ? "Accepted" : "Not yet"],
+      ["Bitrate", formatRate(stats.bitrate) || "—"],
+      ["Received", `${stats.packetsReceived} packets · ${formatBytes(stats.bytesReceived)}`],
+      ["Forwarded", String(stats.packetsForwarded)],
+      ["Dropped", String(stats.forwardDropped)],
+      ["Forward errors", String(stats.forwardErrors)],
+    );
+  }
+  return rows.map(([name, value]) => `<dt>${esc(name)}</dt><dd>${esc(value)}</dd>`).join("");
+}
+
+function srtlaLinks(stats) {
+  if (!stats || !stats.links.length) return "<p class=\"hint\">No links yet.</p>";
+  const rows = stats.links.map((link) => `
+    <tr class="${link.idle >= 5 ? "stale" : ""}">
+      <td>${esc(link.remote)}</td>
+      <td>${esc(formatRate(link.bitrate) || "—")}</td>
+      <td>${link.loss == null ? "—" : esc(`${Number(link.loss).toFixed(1)}%`)}</td>
+      <td>${link.rtt ? esc(`${link.rtt} ms`) : "—"}</td>
+      <td>${link.weight ? esc(`${link.weight}%`) : "—"}</td>
+      <td>${esc(`${link.idle} s`)}</td>
+      <td>${link.errors ? esc(String(link.errors)) : "—"}</td>
+    </tr>
+  `).join("");
+  return `<table class="links"><thead><tr>
+    <th>Link</th><th>Rate</th><th>Loss</th><th>RTT</th><th>Weight</th><th>Idle</th><th>Errors</th>
+  </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+function paintSrtla() {
+  if (!srtlaState) return;
+  srtlaBinary.hidden = srtlaState.binary !== false;
+  const key = srtlaState.receivers.map((item) => item.id).join(",");
+  if (key !== srtlaKey) {
+    srtlaKey = key;
+    srtlaList.innerHTML = srtlaState.receivers.map((item) => `
+      <article class="card srtla-card" data-srtla="${esc(item.id)}">
+        <div class="slot-top">
+          <h3 data-name></h3>
+          <span class="badge" data-badge></span>
+          <button type="button" data-edit-srtla="${esc(item.id)}">Edit</button>
+          <button type="button" data-restart-srtla="${esc(item.id)}">Restart</button>
+          <button type="button" data-remove-srtla="${esc(item.id)}">Remove</button>
+        </div>
+        <p class="note" data-notes hidden></p>
+        <dl data-facts></dl>
+        <div data-links></div>
+        <pre class="log quiet" data-log hidden></pre>
+      </article>
+    `).join("");
+  }
+  srtlaEmpty.hidden = srtlaState.receivers.length > 0;
+  srtlaState.receivers.forEach((item) => {
+    const card = srtlaList.querySelector(`[data-srtla="${item.id}"]`);
+    if (!card) return;
+    card.querySelector("[data-name]").textContent = item.label;
+    const [kind, text] = srtlaBadge(item);
+    const badgeEl = card.querySelector("[data-badge]");
+    badgeEl.className = `badge ${kind}`;
+    badgeEl.textContent = text;
+    const notes = card.querySelector("[data-notes]");
+    const noteText = (item.notes || []).join("\n");
+    notes.hidden = !noteText;
+    if (notes.textContent !== noteText) notes.textContent = noteText;
+    card.querySelector("[data-facts]").innerHTML = srtlaFacts(item);
+    card.querySelector("[data-links]").innerHTML = srtlaLinks(item.stats);
+    const log = card.querySelector("[data-log]");
+    const logText = item.log || "";
+    log.hidden = !logText;
+    if (log.textContent !== logText) log.textContent = logText;
+  });
+}
+
+async function refreshSrtla() {
+  if (!state || !state.admin || !document.body.classList.contains("view-srtla")) return;
+  const gen = ++srtlaGen;
+  try {
+    const next = await api("/api/srtla");
+    if (!next || gen !== srtlaGen) return;
+    srtlaState = next;
+    paintSrtla();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function rememberSrtla(next) {
+  if (!next) return;
+  if (next.warning) window.alert(next.warning);
+  srtlaGen += 1;
+  srtlaState = next;
+  paintSrtla();
+}
+
+function usedSrtlaPorts() {
+  const used = new Set();
+  state.sources.forEach((source) => {
+    if (source.mode === "listener" && source.port) used.add(source.port);
+  });
+  Object.values(state.slots).forEach((slot) => {
+    if (slot.kind === "srt" && slot.srtMode === "listener" && slot.port) used.add(slot.port);
+  });
+  (srtlaState?.receivers || []).forEach((item) => used.add(item.port));
+  return used;
+}
+
+function nextSrtlaPort() {
+  const used = usedSrtlaPorts();
+  let port = 5000;
+  while (used.has(port)) port += 1;
+  return port;
+}
+
+function fillSrtlaSources(selected) {
+  const select = srtlaForm.elements.sourceId;
+  const editing = srtlaForm.dataset.editing;
+  const used = new Set(
+    (srtlaState?.receivers || [])
+      .filter((item) => item.id !== editing)
+      .map((item) => item.sourceId),
+  );
+  const options = state.sources.filter((source) => source.mode === "listener" && !used.has(source.id));
+  select.innerHTML = options.map((source) => (
+    `<option value="${esc(source.id)}">${esc(source.label)} · UDP ${source.port}</option>`
+  )).join("");
+  if (selected && options.some((source) => source.id === selected)) select.value = selected;
+  srtlaFormNote.textContent = options.length
+    ? (srtlaState?.advertise
+      ? `Encoder URL uses ${srtlaState.advertise} and the public UDP port.`
+      : "Set SRTLA_PUBLIC_HOST in config.env to show the encoder URL on each card.")
+    : "Add a listener input first. SRTLA only feeds an input that is already waiting on a port.";
+  select.required = options.length > 0;
+}
+
+function openSrtlaEditor(item) {
+  srtlaForm.hidden = false;
+  srtlaForm.dataset.editing = item ? item.id : "";
+  srtlaForm.elements.label.value = item ? item.label : "";
+  srtlaForm.elements.port.value = item ? item.port : nextSrtlaPort();
+  srtlaForm.elements.latencyMs.value = item ? item.latencyMs : 2000;
+  srtlaForm.elements.lossmaxttl.value = item ? item.lossmaxttl : 40;
+  fillSrtlaSources(item ? item.sourceId : "");
+  srtlaForm.elements.label.focus();
+}
+
+function closeSrtlaEditor() {
+  srtlaForm.hidden = true;
+  srtlaForm.dataset.editing = "";
+}
+
 function applyRole() {
   document.body.classList.toggle("is-operator", !state.admin);
   addSourceButton.hidden = !state.admin;
   addOutputButton.hidden = !state.admin;
+  viewsEl.hidden = !state.admin;
+  if (!state.admin) showView("route");
   const note = document.querySelector("#inputs-note");
   note.textContent = state.admin
     ? "Drag a name onto an SDI slot. Caller and listener inputs can be edited here."
@@ -576,6 +779,7 @@ async function tick() {
       logoutEl.hidden = !next.auth;
       applyRole();
       shell();
+      if (next.admin && location.hash === "#srtla") showView("srtla");
     } else if (changed) {
       state = next;
       applyRole();
@@ -585,6 +789,7 @@ async function tick() {
     }
     paint();
     checkStalls();
+    if (document.body.classList.contains("view-srtla")) refreshSrtla();
   } catch (error) {
     console.error(error);
   }
@@ -834,6 +1039,59 @@ outputForm.addEventListener("submit", async (event) => {
   try {
     const next = await api("/api/outputs", { method: "POST", body: JSON.stringify(body) });
     await applyOutputResponse(next);
+  } catch (error) {
+    window.alert(error.message);
+  }
+});
+
+document.querySelector("#view-route").addEventListener("click", () => showView("route"));
+document.querySelector("#view-srtla").addEventListener("click", () => {
+  showView("srtla");
+  refreshSrtla();
+});
+document.querySelector("#add-srtla").addEventListener("click", () => openSrtlaEditor(null));
+document.querySelector("#cancel-srtla").addEventListener("click", closeSrtlaEditor);
+srtlaForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!srtlaForm.elements.sourceId.value) {
+    window.alert("Add a listener input first.");
+    return;
+  }
+  const editing = srtlaForm.dataset.editing;
+  const body = {
+    label: srtlaForm.elements.label.value.trim(),
+    port: Number(srtlaForm.elements.port.value),
+    sourceId: srtlaForm.elements.sourceId.value,
+    latencyMs: Number(srtlaForm.elements.latencyMs.value),
+    lossmaxttl: Number(srtlaForm.elements.lossmaxttl.value),
+  };
+  const path = editing ? `/api/srtla/${encodeURIComponent(editing)}` : "/api/srtla";
+  try {
+    const next = await api(path, { method: "POST", body: JSON.stringify(body) });
+    rememberSrtla(next);
+    if (next) closeSrtlaEditor();
+  } catch (error) {
+    window.alert(error.message);
+  }
+});
+srtlaList.addEventListener("click", async (event) => {
+  const edit = event.target.closest("[data-edit-srtla]");
+  const restart = event.target.closest("[data-restart-srtla]");
+  const remove = event.target.closest("[data-remove-srtla]");
+  if (!srtlaState) return;
+  if (edit) {
+    const item = srtlaState.receivers.find((entry) => entry.id === edit.dataset.editSrtla);
+    if (item) openSrtlaEditor(item);
+    return;
+  }
+  const id = (restart || remove)?.dataset.restartSrtla || (restart || remove)?.dataset.removeSrtla;
+  if (!id) return;
+  if (remove && !window.confirm("Remove this SRTLA receiver?")) return;
+  const path = restart
+    ? `/api/srtla/${encodeURIComponent(id)}/restart`
+    : `/api/srtla/${encodeURIComponent(id)}/delete`;
+  try {
+    rememberSrtla(await api(path, { method: "POST", body: "{}" }));
   } catch (error) {
     window.alert(error.message);
   }

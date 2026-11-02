@@ -18,7 +18,7 @@ Keycloak **bukan** di mesin Z420. Itu layanan bersama di mesin lain, URL `https:
 | WebRTC preview | `https://webrtc-kiloview.cnn.co.id` (NPM → `:8889`, websocket nyala) |
 | UDP media WebRTC | Langsung ke Z420, bukan lewat NPM. `webrtcAdditionalHosts` di server harus `172.17.20.34` |
 | Realm / client | `kiloview` / `kiloview` (confidential, standard flow) |
-| Grup admin | `IT` — boleh ubah input, menambah output, dan mengunci output |
+| Grup admin | `IT` — boleh ubah input, menambah output, mengunci output, dan tab **SRTLA** (`srtla_rec`) |
 | Grup operator | `Transmission` — preview dan drag saja. Output terkunci tidak bisa diubah |
 | SDI 1 | DeckLink 4K Extreme, persistent ID `40604f81` |
 | SDI 2 | DeckLink 4K Extreme, persistent ID `49205acf` |
@@ -48,7 +48,7 @@ Keycloak **bukan** di mesin Z420. Itu layanan bersama di mesin lain, URL `https:
 | `operator/static/` | UI STREAM ROUTE. Bahasa Inggris |
 | `operator/config.env` | Env runtime. Hanya di server yang berlaku. Jangan di-commit |
 | `operator/docker-compose.yml` | Container operator, network host, privileged, mount host gst dan CA |
-| `operator/data/` | `state.json` (rute dan kunci), `sources.json` (katalog), `outputs.json` (daftar output). Ada di server, volume `./data` |
+| `operator/data/` | `state.json`, `sources.json`, `outputs.json`, `srtla.json` (receiver bonding). Volume `./data` di server |
 | `mediamtx/mediamtx.yml` | Path MediaMTX. Header di server harus IP Z420 |
 | `mediamtx/docker-compose.yml` | `bluenviron/mediamtx:1`, network host, yml read-only |
 | `keycloak/stream-route/` | Theme login. Dipasang dengan copy ke host Keycloak, bukan lewat image operator |
@@ -60,6 +60,7 @@ Keycloak **bukan** di mesin Z420. Itu layanan bersama di mesin lain, URL `https:
 
 - Sumber disimpan sebagai URL, bukan port. Skema: `srt`, `rtsp`, `rtsps`, `rtmp`, `rtmps`, `udp`, `http`, `https`. Contoh Univiso: `rtmp://IP/live/KODE?univiso_golivestream=1` (port RTMP default 1935).
 - Input punya dua arah. **Caller**: MediaMTX menelepon URL lawan. KiloLink `srt://127.0.0.1:3001?mode=listener` tetap caller. **Listener**: admin memilih port UDP. FFmpeg di container operator yang membuka port itu, lalu meneruskan MPEG-TS ke MediaMTX lewat `srt://127.0.0.1:8890?streamid=publish:<path>`. MediaMTX sendiri tidak membuka satu port SRT per input.
+- **SRTLA**: IT-only tab dan API `/api/srtla*`. `srtla_rec` di image operator menerima bonding UDP publik, caller ke port listener lokal. Konfig di `srtla.json`. Listener yang dipasangkan pakai `latencyMs`/`lossmaxttl` dari receiver. Env `SRTLA_PUBLIC_HOST` untuk URL encoder di UI.
 - Menambah atau mengubah satu input lewat halaman memakai API MediaMTX. Container MediaMTX tidak di-restart. Input lain yang sedang tayang tidak ikut putus.
 - Path ID: `[A-Za-z0-9][A-Za-z0-9_-]{0,40}`. ID `sdiN`, `srtN`, dan `ndiN` terlarang sebagai ID sumber. Port lokal yang diblokir: `80`, `8090`, `8189`, `8554`, `8888`, `8889`, `8890`, `9997`, `1935`.
 - Audio SDI: `1-2` stereo asli (tanpa matrix), `1-1` channel 1 ke kedua sisi, `2-2` channel 2 ke kedua sisi. Slider volume di halaman hanya untuk dengar di browser, tidak mengubah gain SDI atau SRT/NDI.

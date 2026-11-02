@@ -12,6 +12,10 @@
       <p class="eyebrow">STREAM</p>
       <h1>STREAM ROUTE</h1>
     </div>
+    <nav id="views" class="views" hidden>
+      <button type="button" id="view-route" aria-pressed="true">Route</button>
+      <button type="button" id="view-srtla" aria-pressed="false">SRTLA</button>
+    </nav>
     <div class="who">
       <span id="user"></span>
       <a id="logout" href="/logout" hidden>Log out</a>
@@ -102,6 +106,45 @@
         </div>
       </form>
       <div id="slots" class="slots"></div>
+    </section>
+
+    <section id="srtla-view">
+      <div class="section-head split">
+        <div>
+          <h2>SRTLA</h2>
+          <p>Each receiver joins the encoder's links on one public UDP port, then hands a normal SRT stream to a listener input. SDI and SRT outputs stay as they are. The encoder must send MPEG-TS with packet size 1316. Bonding needs two links or more.</p>
+        </div>
+        <button type="button" id="add-srtla">Add receiver</button>
+      </div>
+      <p class="note" id="srtla-binary" hidden>srtla_rec is not in this image. Rebuild the operator container, then restart it.</p>
+      <form id="srtla-form" class="editor" hidden>
+        <label>Display name
+          <input name="label" maxlength="48" required>
+        </label>
+        <label>Public UDP port
+          <input name="port" type="number" min="1024" max="65535" inputmode="numeric" required>
+          <span class="field-note">The encoder calls this port. Open it on the firewall. It is not the listener input port.</span>
+        </label>
+        <label>Listener input
+          <select name="sourceId" required></select>
+          <span class="field-note">srtla_rec connects to that input on this machine. Add a listener input first if the list is empty.</span>
+        </label>
+        <label>SRT latency (ms)
+          <input name="latencyMs" type="number" min="120" max="8000" value="2000" required>
+          <span class="field-note">Time for a late packet to arrive on another link. 2000 ms is the usual start.</span>
+        </label>
+        <label>Reorder window
+          <input name="lossmaxttl" type="number" min="10" max="200" value="40" required>
+          <span class="field-note">How far out of order a packet may be before SRT asks for it again. 40 is the usual start.</span>
+        </label>
+        <p class="field-note" id="srtla-form-note"></p>
+        <div class="editor-actions">
+          <button type="submit">Save</button>
+          <button type="button" id="cancel-srtla">Cancel</button>
+        </div>
+      </form>
+      <p class="hint" id="srtla-empty" hidden>No SRTLA receiver yet.</p>
+      <div id="srtla-list" class="srtla-list"></div>
     </section>
   </main>
   <div id="stats-panel" class="stats-panel" hidden>
