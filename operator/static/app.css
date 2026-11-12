@@ -26,7 +26,7 @@ body {
   color: var(--text);
 }
 
-header, main { width: min(1600px, calc(100% - 32px)); margin: 0 auto; }
+header, main { width: min(1520px, calc(100% - 32px)); margin: 0 auto; }
 
 header {
   display: flex;
@@ -59,8 +59,8 @@ main {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(400px, 40%) minmax(0, 1fr);
-  gap: 20px;
+  grid-template-columns: minmax(360px, 34%) minmax(0, 1fr);
+  gap: 16px;
   align-items: stretch;
   padding: 12px 0 16px;
 }
@@ -155,7 +155,7 @@ body.is-operator .reorder-handle { display: none; }
   align-items: flex-start;
   gap: 8px 10px;
 }
-.card-drag { display: grid; gap: 2px; cursor: grab; min-width: 0; flex: 1 1 200px; }
+.card-drag { display: grid; gap: 2px; cursor: grab; min-width: 0; flex: 1 1 180px; }
 .preview.card-drag { cursor: grab; }
 .preview.card-drag video { pointer-events: none; }
 .card-drag:active { cursor: grabbing; }
