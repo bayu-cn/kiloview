@@ -130,6 +130,24 @@ main {
 }
 
 .card-foot, .slot { padding: 10px 12px 12px; }
+.reorder-handle {
+  flex: none;
+  align-self: stretch;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+  border-radius: 4px;
+  padding: 4px 6px;
+  cursor: grab;
+  font-size: 13px;
+  line-height: 1;
+}
+.reorder-handle:active { cursor: grabbing; }
+body.is-operator .reorder-handle { display: none; }
+.card.reorder-active,
+.slot.reorder-active { opacity: 0.55; }
+.card.reorder-over,
+.slot.reorder-over { outline: 1px dashed var(--muted); outline-offset: 2px; }
 .card-foot {
   display: flex;
   justify-content: space-between;

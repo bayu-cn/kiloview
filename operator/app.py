@@ -179,7 +179,8 @@ def load_outputs() -> None:
         loaded[slot_id] = meta
     if loaded:
         SLOTS.clear()
-        SLOTS.update(loaded)
+        for slot_id in loaded:
+            SLOTS[slot_id] = loaded[slot_id]
 
 
 def sink_device_args(slot_id: str) -> list[str]:
@@ -1888,6 +1889,39 @@ def webrtc_base() -> str:
 
 
 _rate_marks: dict[str, tuple[float, int]] = {}
+_flow_marks: dict[str, tuple[int, float]] = {}
+
+
+def stall_seconds() -> float:
+    try:
+        return max(2.0, float(cfg("SIGNAL_STALL_SECONDS", "5") or "5"))
+    except (TypeError, ValueError):
+        return 5.0
+
+
+def media_flow_active(name: str, received: int, path_open: bool) -> bool:
+    if not path_open:
+        _flow_marks.pop(name, None)
+        return False
+    now = time.monotonic()
+    window = stall_seconds()
+    if received <= 0:
+        mark = _flow_marks.get(name)
+        if mark is None:
+            _flow_marks[name] = (0, now)
+            return True
+        if mark[0] > 0 and now - mark[1] >= window:
+            return False
+        if mark[0] == 0 and now - mark[1] >= window:
+            return False
+        return True
+    mark = _flow_marks.get(name)
+    if mark is None or received > mark[0]:
+        _flow_marks[name] = (received, now)
+        return True
+    if now - mark[1] >= window:
+        return False
+    return True
 
 
 def as_int(value: object) -> int:
@@ -1994,13 +2028,14 @@ def collect_stats() -> tuple[dict[str, bool], dict[str, dict]]:
         name = item.get("name")
         if not isinstance(name, str):
             continue
-        ready[name] = bool(item.get("ready") or item.get("online"))
+        path_open = bool(item.get("ready") or item.get("online"))
         inbound = as_int(item.get("inboundBytes") or item.get("bytesReceived"))
         outbound = as_int(item.get("outboundBytes") or item.get("bytesSent"))
         chosen = srt_by.get(name)
         summary = srt_summary(chosen[1]) if chosen else None
         received = summary["received"] if summary and summary["received"] else inbound or rtmp_bytes.get(name, 0)
         sent = summary["sent"] if summary and summary["sent"] else outbound
+        ready[name] = path_open and media_flow_active(name, received, path_open)
         bitrate = summary["bitrate"] if summary else None
         if not bitrate:
             bitrate = bitrate_from_bytes(name, received or sent)
@@ -2041,6 +2076,13 @@ def snapshot() -> dict:
             routed.setdefault(slot["source"], []).append(meta["label"])
         kind = meta.get("kind") or "sdi"
         pid = meta.get("persistent_id")
+        status = run["status"]
+        if (
+            slot["source"]
+            and not ready.get(slot["source"], False)
+            and status == "playing"
+        ):
+            status = "waiting"
         slots_out[slot_id] = {
             "label": meta["label"],
             "kind": kind,
@@ -2054,8 +2096,8 @@ def snapshot() -> dict:
             "mode": slot["mode"],
             "audio": slot["audio"],
             "locked": bool(slot.get("locked")),
-            "status": run["status"],
-            "error": run["error"] if run["status"] == "error" else None,
+            "status": status,
+            "error": run["error"] if status == "error" else None,
             "whep": f"{web}/{slot_id}/whep" if slot["source"] else None,
             "previewError": run["preview_error"],
             "stats": stats.get(slot["source"]) if slot["source"] else None,
@@ -2079,6 +2121,7 @@ def snapshot() -> dict:
             for source in catalog
         ],
         "slots": slots_out,
+        "slotOrder": list(SLOTS.keys()),
     }
 
 
@@ -2269,6 +2312,37 @@ def update_source(source_id: str, payload: dict) -> str | None:
     return warning or listen_error or srtla_error
 
 
+def reorder_sources(order: object) -> None:
+    if not isinstance(order, list):
+        raise ValueError("Order must be a list of input IDs.")
+    wanted = [str(item).strip() for item in order if str(item).strip()]
+    if len(wanted) != len(set(wanted)):
+        raise ValueError("Duplicate IDs in order.")
+    with lock:
+        current = [item["id"] for item in catalog]
+        if set(wanted) != set(current):
+            raise ValueError("Order must list every input exactly once.")
+        by_id = {item["id"]: item for item in catalog}
+        catalog[:] = [by_id[source_id] for source_id in wanted]
+        save_catalog()
+
+
+def reorder_outputs(order: object) -> None:
+    if not isinstance(order, list):
+        raise ValueError("Order must be a list of output IDs.")
+    wanted = [str(item).strip() for item in order if str(item).strip()]
+    if len(wanted) != len(set(wanted)):
+        raise ValueError("Duplicate IDs in order.")
+    with lock:
+        if set(wanted) != set(SLOTS.keys()):
+            raise ValueError("Order must list every output exactly once.")
+        reordered = {slot_id: SLOTS[slot_id] for slot_id in wanted}
+        SLOTS.clear()
+        for slot_id in wanted:
+            SLOTS[slot_id] = reordered[slot_id]
+        save_outputs()
+
+
 def delete_source(source_id: str) -> None:
     with lock:
         if any(slot["source"] == source_id for slot in state.values()):
@@ -2454,7 +2528,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(403, {"error": "Only the IT group can edit inputs."})
             return
         try:
-            if path.endswith("/delete"):
+            if path == "/api/sources/order":
+                reorder_sources(self.read_json().get("order"))
+                warning = None
+            elif path.endswith("/delete"):
                 source_id = urllib.parse.unquote(path[len("/api/sources/"):-len("/delete")])
                 delete_source(source_id)
                 warning = None
@@ -2521,7 +2598,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(403, {"error": "Only the IT group can add outputs."})
             return
         try:
-            if path.endswith("/delete"):
+            if path == "/api/outputs/order":
+                reorder_outputs(self.read_json().get("order"))
+                warning = None
+            elif path.endswith("/delete"):
                 slot_id = urllib.parse.unquote(path[len("/api/outputs/"):-len("/delete")])
                 delete_output(slot_id)
                 warning = None

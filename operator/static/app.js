@@ -300,6 +300,79 @@ function closeStats() {
   if (statsPanel) statsPanel.hidden = true;
 }
 
+const REORDER_MIME = "application/x-stream-route-reorder";
+
+function listOrder(listName) {
+  const root = listName === "sources" ? sourcesEl : slotsEl;
+  const attr = listName === "sources" ? "data-source" : "data-slot";
+  return [...root.querySelectorAll(`[${attr}]`)].map((el) => el.getAttribute(attr));
+}
+
+function bindListReorder() {
+  if (!state || !state.admin) return;
+  [
+    { root: sourcesEl, attr: "data-source", list: "sources", path: "/api/sources/order" },
+    { root: slotsEl, attr: "data-slot", list: "outputs", path: "/api/outputs/order" },
+  ].forEach(({ root, attr, list, path }) => {
+    root.querySelectorAll(".reorder-handle").forEach((handle) => {
+      handle.addEventListener("dragstart", (event) => {
+        event.stopPropagation();
+        const row = handle.closest(`[${attr}]`);
+        if (!row) return;
+        event.dataTransfer.setData(REORDER_MIME, row.getAttribute(attr));
+        event.dataTransfer.effectAllowed = "move";
+        row.classList.add("reorder-active");
+      });
+      handle.addEventListener("dragend", () => {
+        root.querySelectorAll(".reorder-active, .reorder-over").forEach((el) => {
+          el.classList.remove("reorder-active", "reorder-over");
+        });
+      });
+    });
+    root.querySelectorAll(`[${attr}]`).forEach((row) => {
+      row.addEventListener("dragover", (event) => {
+        if (![...event.dataTransfer.types].includes(REORDER_MIME)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        row.classList.add("reorder-over");
+      });
+      row.addEventListener("dragleave", () => row.classList.remove("reorder-over"));
+      row.addEventListener("drop", async (event) => {
+        if (![...event.dataTransfer.types].includes(REORDER_MIME)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        row.classList.remove("reorder-over");
+        const fromId = event.dataTransfer.getData(REORDER_MIME);
+        const toId = row.getAttribute(attr);
+        if (!fromId || !toId || fromId === toId) return;
+        const order = listOrder(list);
+        const from = order.indexOf(fromId);
+        const to = order.indexOf(toId);
+        if (from < 0 || to < 0) return;
+        order.splice(from, 1);
+        order.splice(to, 0, fromId);
+        try {
+          const next = await api(path, { method: "POST", body: JSON.stringify({ order }) });
+          if (!next) return;
+          if (next.warning) window.alert(next.warning);
+          state = next;
+          shell();
+          paint();
+          syncMedia();
+        } catch (error) {
+          window.alert(error.message);
+        }
+      });
+    });
+  });
+}
+
+function slotIds(body = state) {
+  if (!body) return [];
+  if (body.slotOrder && body.slotOrder.length) return body.slotOrder.filter((id) => body.slots[id]);
+  return Object.keys(body.slots || {});
+}
+
 function shell() {
   sourcesEl.innerHTML = state.sources.map((source) => state.admin ? `
     <article class="card" data-source="${esc(source.id)}">
@@ -307,6 +380,7 @@ function shell() {
         <video data-preview="${esc(source.id)}" playsinline autoplay muted></video>
       </div>
       <div class="card-foot">
+        <button type="button" class="reorder-handle" data-reorder-list="sources" draggable="true" title="Drag to reorder">&#x2807;&#x2807;</button>
         <div class="card-drag" draggable="true">
           <span class="name" data-label="${esc(source.id)}"></span>
           <span class="hint" data-url="${esc(source.id)}"></span>
@@ -328,10 +402,13 @@ function shell() {
     </article>
   `).join("");
 
-  slotsEl.innerHTML = Object.entries(state.slots).map(([id, slot]) => `
+  slotsEl.innerHTML = slotIds().map((id) => {
+    const slot = state.slots[id];
+    return `
     <article class="slot" data-slot="${id}">
       <div class="slot-top">
-        <h3>${slot.label}</h3>
+        <button type="button" class="reorder-handle" data-reorder-list="outputs" draggable="true" title="Drag to reorder">&#x2807;&#x2807;</button>
+        <h3>${esc(slot.label)}</h3>
         <span class="lock-mark" data-lock-mark="${id}" hidden>Locked</span>
         <button type="button" class="lock" data-lock="${id}">Lock</button>
         <button type="button" class="remove-output" data-remove="${id}">Remove</button>
@@ -367,7 +444,8 @@ function shell() {
       <p class="note" data-preview-note="${id}" hidden></p>
       <pre class="log" data-log="${id}" hidden></pre>
     </article>
-  `).join("");
+  `;
+  }).join("");
 
   sourcesEl.querySelectorAll(".card").forEach((card) => {
     const handle = card.querySelector(".card-drag");
@@ -455,6 +533,7 @@ function shell() {
       sessionStorage.setItem(`listen-${id}`, String(level));
     });
   });
+  bindListReorder();
 }
 
 function paint() {
@@ -760,7 +839,7 @@ function applyRole() {
   if (!state.admin) showView("route");
   const note = document.querySelector("#inputs-note");
   note.textContent = state.admin
-    ? "Drag a name onto an SDI slot. Caller and listener inputs can be edited here."
+    ? "Drag preview onto a slot to route. Use ⋮⋮ on a card to change list order."
     : "Drag a preview onto an SDI slot.";
   if (!state.admin) {
     closeEditor();
@@ -846,7 +925,7 @@ function layoutKey(body) {
   return [
     body.admin ? "1" : "0",
     body.sources.map((source) => source.id).join(","),
-    Object.keys(body.slots).join(","),
+    slotIds(body).join(","),
   ].join("|");
 }
 

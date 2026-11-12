@@ -34,6 +34,10 @@ Kalau preview halaman hilang sebentar lalu kembali, halaman menyambung ulang sen
 
 Transmission tidak bisa menambah, mengubah, atau menghapus input dan output. Itu tugas IT.
 
+Input **live** di kartu artinya ada data baru ke MediaMTX (bukan sekadar koneksi KiloLink). Kalau encoder mati tapi sesi masih terbuka, setelah sekitar **5 detik** tanpa byte baru badge berubah **no signal**. Rute output **tetap** (tidak auto-Clear). Output terkunci berperilaku sama.
+
+IT bisa mengatur urutan tampilan: tarik gagang **⋮⋮** di kartu input atau output. Urutan disimpan di server; tidak perlu hapus dan buat ulang supaya SDI 1 / SDI 2 berdampingan.
+
 ## IT admin
 
 Akun harus ada di grup Keycloak `IT`. Di header ada tab **Route** dan **SRTLA**. Transmission hanya melihat Route. Di Route ada **Add input** dan **Add output**. Kartu input menampilkan display name, path ID, serta URL atau port.
