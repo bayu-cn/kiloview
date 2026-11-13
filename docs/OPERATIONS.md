@@ -34,7 +34,9 @@ Kalau preview halaman hilang sebentar lalu kembali, halaman menyambung ulang sen
 
 Transmission tidak bisa menambah, mengubah, atau menghapus input dan output. Itu tugas IT.
 
-Input **live** di kartu artinya ada data baru ke MediaMTX (bukan sekadar koneksi KiloLink). Kalau encoder mati tapi sesi masih terbuka, setelah sekitar **5 detik** tanpa byte baru badge berubah **no signal**. Rute output **tetap** (tidak auto-Clear). Output terkunci berperilaku sama.
+Input **live** di kartu artinya ada data baru ke MediaMTX (bukan sekadar koneksi KiloLink). Kalau encoder mati tapi sesi masih terbuka, setelah sekitar **5 detik** tanpa byte baru badge berubah **no signal**.
+
+Output **tidak terkunci**: setelah **5 detik** no signal, sumber **lepas sendiri** (slot kosong) supaya bisa drag input lain. Output **Locked**: rute **tetap**, status **No signal**, gambar kembali saat encoder nyala (tanpa drag ulang). Matikan auto-clear: `SIGNAL_STALL_AUTO_CLEAR=0` di `config.env`.
 
 IT bisa mengatur urutan tampilan: tarik gagang **⋮⋮** di kartu input atau output. Urutan disimpan di server; tidak perlu hapus dan buat ulang supaya SDI 1 / SDI 2 berdampingan.
 

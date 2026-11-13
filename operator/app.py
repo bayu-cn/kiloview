@@ -1890,6 +1890,7 @@ def webrtc_base() -> str:
 
 _rate_marks: dict[str, tuple[float, int]] = {}
 _flow_marks: dict[str, tuple[int, float]] = {}
+_stall_clear_since: dict[str, float] = {}
 
 
 def stall_seconds() -> float:
@@ -1922,6 +1923,47 @@ def media_flow_active(name: str, received: int, path_open: bool) -> bool:
     if now - mark[1] >= window:
         return False
     return True
+
+
+def stall_auto_clear_enabled() -> bool:
+    return cfg("SIGNAL_STALL_AUTO_CLEAR", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def maybe_auto_clear_stalled(ready: dict[str, bool]) -> None:
+    if not stall_auto_clear_enabled():
+        return
+    now = time.monotonic()
+    window = stall_seconds()
+    with lock:
+        for slot_id in list(SLOTS.keys()):
+            slot = state.get(slot_id)
+            if slot is None:
+                _stall_clear_since.pop(slot_id, None)
+                continue
+            source_id = slot.get("source")
+            if not source_id:
+                _stall_clear_since.pop(slot_id, None)
+                continue
+            if slot.get("locked"):
+                _stall_clear_since.pop(slot_id, None)
+                continue
+            if ready.get(source_id, False):
+                _stall_clear_since.pop(slot_id, None)
+                continue
+            started = _stall_clear_since.get(slot_id)
+            if started is None:
+                _stall_clear_since[slot_id] = now
+                continue
+            if now - started < window:
+                continue
+            slot["source"] = None
+            _stall_clear_since.pop(slot_id, None)
+            save_state()
+            run = runtime.get(slot_id)
+            if run:
+                run["restarts"] = 0
+                run["preview_restarts"] = 0
+            start_pipeline(slot_id)
 
 
 def as_int(value: object) -> int:
@@ -2053,6 +2095,7 @@ def collect_stats() -> tuple[dict[str, bool], dict[str, dict]]:
 
 def snapshot() -> dict:
     ready, stats = collect_stats()
+    maybe_auto_clear_stalled(ready)
     with lock:
         slots_copy = {slot_id: dict(slot) for slot_id, slot in state.items()}
         runs_copy = {}
