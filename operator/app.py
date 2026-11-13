@@ -1900,6 +1900,16 @@ def stall_seconds() -> float:
         return 5.0
 
 
+def stall_clear_seconds() -> float:
+    raw = cfg("SIGNAL_STALL_AUTO_CLEAR_SECONDS")
+    if not raw:
+        return stall_seconds()
+    try:
+        return max(2.0, float(raw))
+    except (TypeError, ValueError):
+        return stall_seconds()
+
+
 def media_flow_active(name: str, received: int, path_open: bool) -> bool:
     if not path_open:
         _flow_marks.pop(name, None)
@@ -1933,7 +1943,7 @@ def maybe_auto_clear_stalled(ready: dict[str, bool]) -> None:
     if not stall_auto_clear_enabled():
         return
     now = time.monotonic()
-    window = stall_seconds()
+    window = stall_clear_seconds()
     with lock:
         for slot_id in list(SLOTS.keys()):
             slot = state.get(slot_id)

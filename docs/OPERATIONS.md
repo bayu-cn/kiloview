@@ -36,7 +36,15 @@ Transmission tidak bisa menambah, mengubah, atau menghapus input dan output. Itu
 
 Input **live** di kartu artinya ada data baru ke MediaMTX (bukan sekadar koneksi KiloLink). Kalau encoder mati tapi sesi masih terbuka, setelah sekitar **5 detik** tanpa byte baru badge berubah **no signal**.
 
-Output **tetap** menempel (Empty hanya lewat **Clear** manual), status **No signal** setelah stall. Opsional: `SIGNAL_STALL_AUTO_CLEAR=1` di `config.env` server supaya output **tidak locked** auto-Clear setelah **5 detik** no signal. **Locked** tidak pernah auto-Clear.
+Output **tetap** menempel kecuali auto-clear aktif. Di `config.env` server:
+
+| Variabel | Fungsi |
+| --- | --- |
+| `SIGNAL_STALL_SECONDS` | Berapa detik tanpa byte baru sampai input **no signal** / output **No signal** (default 5). |
+| `SIGNAL_STALL_AUTO_CLEAR=1` | Output **tidak locked** otomatis **Clear** setelah stall. Default off jika tidak di-set. |
+| `SIGNAL_STALL_AUTO_CLEAR_SECONDS` | Berapa detik stall sebelum auto-clear (default sama dengan `SIGNAL_STALL_SECONDS`). Bisa lebih lama supaya flap singkat tidak lepas rute. |
+
+Output **Locked** tidak pernah auto-Clear. Setelah ubah env: `docker restart operator`.
 
 IT bisa mengatur urutan tampilan: tarik gagang **⋮⋮** di kartu input atau output. Urutan disimpan di server; tidak perlu hapus dan buat ulang supaya SDI 1 / SDI 2 berdampingan.
 
