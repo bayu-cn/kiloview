@@ -1926,7 +1926,7 @@ def media_flow_active(name: str, received: int, path_open: bool) -> bool:
 
 
 def stall_auto_clear_enabled() -> bool:
-    return cfg("SIGNAL_STALL_AUTO_CLEAR", "1").strip().lower() not in {"0", "false", "no", "off"}
+    return cfg("SIGNAL_STALL_AUTO_CLEAR", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def maybe_auto_clear_stalled(ready: dict[str, bool]) -> None:
