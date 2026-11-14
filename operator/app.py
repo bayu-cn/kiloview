@@ -1939,6 +1939,14 @@ def stall_auto_clear_enabled() -> bool:
     return cfg("SIGNAL_STALL_AUTO_CLEAR", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def output_pipeline_live(slot_id: str) -> bool:
+    run = runtime.get(slot_id)
+    if not run:
+        return False
+    proc = run.get("proc")
+    return proc is not None and proc.poll() is None and run.get("status") == "playing"
+
+
 def maybe_auto_clear_stalled(ready: dict[str, bool]) -> None:
     if not stall_auto_clear_enabled():
         return
@@ -1958,6 +1966,9 @@ def maybe_auto_clear_stalled(ready: dict[str, bool]) -> None:
                 _stall_clear_since.pop(slot_id, None)
                 continue
             if ready.get(source_id, False):
+                _stall_clear_since.pop(slot_id, None)
+                continue
+            if output_pipeline_live(slot_id):
                 _stall_clear_since.pop(slot_id, None)
                 continue
             started = _stall_clear_since.get(slot_id)
@@ -2114,10 +2125,12 @@ def snapshot() -> dict:
             if proc is not None and proc.poll() is None and run["status"] == "error":
                 run["status"] = "playing"
                 run["error"] = None
+            pipeline_live = proc is not None and proc.poll() is None and run["status"] == "playing"
             runs_copy[slot_id] = {
                 "status": run["status"],
                 "error": run["error"],
                 "preview_error": run.get("preview_error"),
+                "pipeline_live": pipeline_live,
             }
     web = webrtc_base()
     routed: dict[str, list[str]] = {}
@@ -2134,6 +2147,7 @@ def snapshot() -> dict:
             slot["source"]
             and not ready.get(slot["source"], False)
             and status == "playing"
+            and not run.get("pipeline_live")
         ):
             status = "waiting"
         slots_out[slot_id] = {
@@ -2441,6 +2455,7 @@ def apply_slot(slot_id: str, payload: dict, is_admin: bool = False) -> None:
         slot["audio"] = payload["audio"]
     save_state()
     if routed:
+        _stall_clear_since.pop(slot_id, None)
         runtime[slot_id]["restarts"] = 0
         runtime[slot_id]["preview_restarts"] = 0
         start_pipeline(slot_id)

@@ -44,7 +44,7 @@ Output **tetap** menempel kecuali auto-clear aktif. Di `config.env` server:
 | `SIGNAL_STALL_AUTO_CLEAR=1` | Output **tidak locked** otomatis **Clear** setelah stall. Default off jika tidak di-set. |
 | `SIGNAL_STALL_AUTO_CLEAR_SECONDS` | Berapa detik stall sebelum auto-clear (default sama dengan `SIGNAL_STALL_SECONDS`). Bisa lebih lama supaya flap singkat tidak lepas rute. |
 
-Output **Locked** tidak pernah auto-Clear. Setelah ubah env: `docker restart operator`.
+Output **Locked** tidak pernah auto-Clear. Auto-clear tidak jalan kalau pipeline output masih **On air** (GStreamer jalan dan ada gambar ke SDI), walaupun badge input sempat **no signal** (byte MediaMTX macet). Setelah ubah env: `docker restart operator`.
 
 IT bisa mengatur urutan tampilan: tarik gagang **⋮⋮** di kartu input atau output. Urutan disimpan di server; tidak perlu hapus dan buat ulang supaya SDI 1 / SDI 2 berdampingan.
 
