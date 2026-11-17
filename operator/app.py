@@ -237,6 +237,10 @@ def sources() -> list[str]:
     return [item["id"] for item in catalog]
 
 
+def catalog_item(source_id: str) -> dict | None:
+    return next((entry for entry in catalog if entry["id"] == source_id), None)
+
+
 def sources_path() -> Path:
     return STATE_PATH.parent / "sources.json"
 
@@ -1529,7 +1533,66 @@ def preview_args(slot_id: str) -> list[str] | None:
     return args
 
 
-def pipeline_args(slot_id: str) -> list[str]:
+def sdi_srt_direct_enabled() -> bool:
+    raw = cfg("SDI_SRT_DIRECT", "").strip().lower()
+    if raw in {"1", "true", "yes", "on", "direct", "direct_srt"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    legacy = cfg("SDI_SOURCE", "").strip().lower()
+    return legacy in {"direct_srt", "srt", "srt_direct"}
+
+
+def srt_direct_latency_ms() -> int:
+    try:
+        return max(20, min(3000, int(cfg("SRT_DIRECT_LATENCY_MS", "120") or "120")))
+    except (TypeError, ValueError):
+        return 120
+
+
+def gst_srt_src_element() -> str | None:
+    if gst_has_element("srtsrc"):
+        return "srtsrc"
+    if gst_has_element("srtclientsrc"):
+        return "srtclientsrc"
+    return None
+
+
+def gst_srt_caller_uri(item: dict) -> str | None:
+    url = source_url(item)
+    if not url:
+        return None
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "srt":
+        return None
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    query["mode"] = ["caller"]
+    query["transtype"] = ["live"]
+    query["latency"] = [str(srt_direct_latency_ms())]
+    if "pkt_size" not in query:
+        query["pkt_size"] = ["1316"]
+    flat = {key: values[-1] for key, values in query.items() if values}
+    new_query = urllib.parse.urlencode(flat)
+    return urllib.parse.urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment)
+    )
+
+
+def srt_direct_for_source(source_id: str) -> bool:
+    if not source_id or not sdi_srt_direct_enabled():
+        return False
+    only = cfg("SDI_SRT_DIRECT_SOURCES", "").strip()
+    if only:
+        allowed = {part.strip() for part in only.split(",") if part.strip()}
+        if source_id not in allowed:
+            return False
+    item = catalog_item(source_id)
+    if not item or item.get("mode") != "caller":
+        return False
+    return urllib.parse.urlparse(source_url(item) or "").scheme == "srt"
+
+
+def pipeline_rtsp_args(slot_id: str) -> list[str]:
     slot = state[slot_id]
     mode = slot["mode"]
     location = f"{cfg('RTSP_BASE', 'rtsp://127.0.0.1:8554').rstrip('/')}/{slot['source']}"
@@ -1551,6 +1614,40 @@ def pipeline_args(slot_id: str) -> list[str]:
         *audio_args(slot["audio"]), "!",
         "decklinkaudiosink", *sink_device_args(slot_id), "sync=false", "async=false",
     ]
+
+
+def pipeline_srt_direct_args(slot_id: str) -> list[str] | None:
+    element = gst_srt_src_element()
+    if not element:
+        return None
+    slot = state[slot_id]
+    item = catalog_item(slot.get("source") or "")
+    if not item:
+        return None
+    uri = gst_srt_caller_uri(item)
+    if not uri:
+        return None
+    mode = slot["mode"]
+    decklink_mode = "1080p60" if mode == "1080p60" else "1080i50"
+    # MPEG-TS dari KiloLink (caller kedua ke port yang sama dengan MediaMTX).
+    return [
+        cfg("GST_LAUNCH", "gst-launch-1.0"), "-e",
+        element, f"uri={uri}", "!",
+        "tsdemux", "name=demux",
+        "demux.", "!", "queue", "!", "decodebin", "!", "queue", "!", "video/x-raw", "!",
+        *video_args(mode), "!",
+        "decklinkvideosink", *sink_device_args(slot_id), f"mode={decklink_mode}", "sync=false",
+        "demux.", "!", "queue", "!", "decodebin", "!", "queue", "!",
+        *audio_args(slot["audio"]), "!",
+        "decklinkaudiosink", *sink_device_args(slot_id), "sync=false", "async=false",
+    ]
+
+
+def pipeline_args(slot_id: str) -> list[str] | None:
+    source_id = state[slot_id].get("source") or ""
+    if srt_direct_for_source(source_id):
+        return pipeline_srt_direct_args(slot_id)
+    return pipeline_rtsp_args(slot_id)
 
 
 def srt_output_args(slot_id: str) -> list[str] | None:
@@ -1667,7 +1764,19 @@ def read_log(slot_id: str, suffix: str = "", limit: int = 40) -> str:
 
 def signal_lost(text: str) -> bool:
     lowered = text.lower()
-    return any(phrase in lowered for phrase in ("404", "not found", "no such stream", "end-of-file", "end of file"))
+    return any(
+        phrase in lowered
+        for phrase in (
+            "404",
+            "not found",
+            "no such stream",
+            "end-of-file",
+            "end of file",
+            "connection lost",
+            "connection setup failure",
+            "srt_connect",
+        )
+    )
 
 
 def explain_sdi_error(text: str, device: int) -> str:
@@ -1719,7 +1828,12 @@ def start_pipeline(slot_id: str) -> None:
     args = output_args(slot_id)
     if not args:
         run["status"] = "error"
-        run["error"] = "This output needs FFmpeg in the operator image."
+        if srt_direct_for_source(slot["source"] or ""):
+            run["error"] = (
+                "Direct SRT to SDI needs GStreamer srtsrc on the host and an SRT caller input URL."
+            )
+        else:
+            run["error"] = "This output needs FFmpeg in the operator image."
         start_preview(slot_id)
         return
     log = open(log_path, "w", encoding="utf-8")
