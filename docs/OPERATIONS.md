@@ -28,9 +28,9 @@ Output bertanda **Locked** tidak bisa diseret, diganti modenya, diganti audionya
 
 Dua soket BNC pada satu kartu SDI menampilkan gambar yang sama. SDI 1 dan SDI 2 adalah dua kartu yang berbeda, jadi bisa dua gambar berbeda. SRT dan NDI tidak memakai kartu itu. Gambarnya adalah sumber asli, bukan 1080i50.
 
-Kalau lapangan putus atau bonding drop, sumber tetap menempel di output. Status menjadi **No signal** atau sesaat **On air**. Operator restart pipeline output otomatis saat stall ~5 detik atau saat input **live** lagi (supaya SDI tidak tetap hitam meski preview sudah balik). Jangan Clear dulu. Output **Locked** mengikuti aturan lock.
+Kalau lapangan putus atau bonding drop, sumber tetap menempel di output. Status menjadi **No signal** atau sesaat **On air**. Secara default pipeline output **tidak** di-restart tiap flap singkat: buffer RTSP lebih besar dan restart hanya setelah stall lama (~25 detik), bukan otomatis saat input **live** lagi (supaya SDI tidak sering “Locking…”). Jangan Clear dulu. Output **Locked** mengikuti aturan lock.
 
-Kalau SDI masih hitam padahal input sudah live, tunggu beberapa detik; kalau belum pulih, drag ulang atau IT cek `docker logs operator`.
+Kalau SDI masih hitam padahal preview sudah live, tunggu; kalau belum pulih, drag ulang atau IT naikkan `RTSP_OUTPUT_LATENCY_MS` / set `OUTPUT_RESTART_ON_RECOVER=1` untuk perilaku lama.
 
 Kalau preview halaman hilang sebentar lalu kembali, halaman menyambung ulang sendiri. Gambar di kabel SDI tidak mengikuti volume browser.
 
@@ -45,6 +45,10 @@ Output **tetap** menempel kecuali auto-clear aktif. Di `config.env` server:
 | `SIGNAL_STALL_SECONDS` | Berapa detik tanpa byte baru sampai input **no signal** / output **No signal** (default 5). |
 | `SIGNAL_STALL_AUTO_CLEAR=1` | Output **tidak locked** otomatis **Clear** setelah stall. Default off jika tidak di-set. |
 | `SIGNAL_STALL_AUTO_CLEAR_SECONDS` | Berapa detik stall sebelum auto-clear (default sama dengan `SIGNAL_STALL_SECONDS`). Bisa lebih lama supaya flap singkat tidak lepas rute. |
+| `RTSP_OUTPUT_LATENCY_MS` | Buffer `rtspsrc` ke SDI/NDI (default **1200** ms, max 3000). |
+| `OUTPUT_RESTART_ON_STALL` | `1` = restart pipeline setelah stall lama (default on). |
+| `OUTPUT_STALL_RESTART_SECONDS` | Stall berapa detik sebelum restart output (default **25**, terpisah dari badge `SIGNAL_STALL_SECONDS`). |
+| `OUTPUT_RESTART_ON_RECOVER` | `1` = restart output saat input dari no signal jadi live lagi (default **off**). |
 
 Output **Locked** tidak pernah auto-Clear. Auto-clear tidak jalan kalau pipeline output masih **On air** (GStreamer jalan dan ada gambar ke SDI), walaupun badge input sempat **no signal** (byte MediaMTX macet). Setelah ubah env: `docker restart operator`.
 

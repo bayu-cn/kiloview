@@ -1538,7 +1538,12 @@ def pipeline_args(slot_id: str) -> list[str]:
     # membuat cabang audio gagal nyambung dan waktu pipeline tetap 0.
     return [
         cfg("GST_LAUNCH", "gst-launch-1.0"), "-e",
-        "rtspsrc", f"location={location}", f"latency={rtsp_output_latency_ms()}", "protocols=tcp", "name=src",
+        "rtspsrc",
+        f"location={location}",
+        f"latency={rtsp_output_latency_ms()}",
+        "protocols=tcp",
+        "drop-on-latency=false",
+        "name=src",
         "src.", "!", "application/x-rtp,media=video", "!", "decodebin", "!", "queue", "!", "video/x-raw", "!",
         *video_args(mode), "!",
         "decklinkvideosink", *sink_device_args(slot_id), f"mode={decklink_mode}", "sync=false",
@@ -1602,7 +1607,12 @@ def ndi_output_args(slot_id: str) -> list[str]:
     ndi_name = str(meta.get("ndi_name") or meta["label"]).replace('"', "")
     return [
         cfg("GST_LAUNCH", "gst-launch-1.0"), "-e",
-        "rtspsrc", f"location={location}", f"latency={rtsp_output_latency_ms()}", "protocols=tcp", "name=src",
+        "rtspsrc",
+        f"location={location}",
+        f"latency={rtsp_output_latency_ms()}",
+        "protocols=tcp",
+        "drop-on-latency=false",
+        "name=src",
         "src.", "!", "application/x-rtp,media=video", "!", "decodebin", "!", "queue", "!",
         "videoconvert", "!", "video/x-raw,format=UYVY", "!",
         "ndisinkcombiner", "name=combiner", "!", "ndisink", f'ndi-name="{ndi_name}"',
@@ -1904,9 +1914,32 @@ def stall_seconds() -> float:
 
 def rtsp_output_latency_ms() -> int:
     try:
-        return max(200, min(3000, int(cfg("RTSP_OUTPUT_LATENCY_MS", "600") or "600")))
+        return max(200, min(3000, int(cfg("RTSP_OUTPUT_LATENCY_MS", "1200") or "1200")))
     except (TypeError, ValueError):
-        return 600
+        return 1200
+
+
+def _env_flag(name: str, default: str) -> bool:
+    return cfg(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def output_stall_restart_seconds() -> float:
+    """How long input must be stalled before rebuilding the GStreamer output pipeline."""
+    raw = cfg("OUTPUT_STALL_RESTART_SECONDS")
+    if not raw:
+        return 25.0
+    try:
+        return max(5.0, float(raw))
+    except (TypeError, ValueError):
+        return 25.0
+
+
+def output_restart_on_stall_enabled() -> bool:
+    return _env_flag("OUTPUT_RESTART_ON_STALL", "1")
+
+
+def output_restart_on_recover_enabled() -> bool:
+    return _env_flag("OUTPUT_RESTART_ON_RECOVER", "0")
 
 
 def stall_clear_seconds() -> float:
@@ -1959,9 +1992,15 @@ def restart_slot_pipeline(slot_id: str) -> None:
 
 
 def handle_output_signal_transitions(ready: dict[str, bool]) -> None:
-    """Restart output pipelines when a bonded source stalls or comes back (GStreamer may stay up but SDI black)."""
+    """Optionally restart output pipelines after a long stall or on input recovery (tunable via config.env)."""
+    if not output_restart_on_stall_enabled() and not output_restart_on_recover_enabled():
+        with lock:
+            for item in catalog:
+                _source_ready_prev[item["id"]] = ready.get(item["id"], False)
+        _output_stall_since.clear()
+        return
     now = time.monotonic()
-    window = stall_seconds()
+    stall_restart_window = output_stall_restart_seconds()
     to_restart: set[str] = set()
     with lock:
         catalog_ids = [item["id"] for item in catalog]
@@ -1984,13 +2023,17 @@ def handle_output_signal_transitions(ready: dict[str, bool]) -> None:
                 since = _output_stall_since.get(slot_id)
                 if since is None:
                     _output_stall_since[slot_id] = now
-                elif now - since >= window:
+                elif output_restart_on_stall_enabled() and now - since >= stall_restart_window:
                     to_restart.add(slot_id)
                     _output_stall_since.pop(slot_id, None)
         for source_id in catalog_ids:
             was = _source_ready_prev.get(source_id, ready.get(source_id, False))
             now_ready = ready.get(source_id, False)
-            if not was and now_ready:
+            if (
+                output_restart_on_recover_enabled()
+                and not was
+                and now_ready
+            ):
                 for slot_id, slot in state.items():
                     if slot.get("source") == source_id:
                         to_restart.add(slot_id)
