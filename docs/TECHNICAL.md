@@ -27,8 +27,6 @@ P3 Mini
                                 -->  GStreamer host  -->  DeckLink  -->  kabel SDI
 ```
 
-Opsional `SDI_SRT_DIRECT=1` di `config.env`: GStreamer **caller kedua** ke URL SRT input yang sama (mis. `srt://127.0.0.1:3001`) dengan MPEG-TS → `tsdemux` → DeckLink. Preview dan stall badge tetap lewat MediaMTX/RTSP. Input **listener** (FFmpeg/SRTLA) tetap RTSP ke output. Hanya input **caller** `srt://` yang memakai jalur ini. Env: `SRT_DIRECT_LATENCY_MS` (default 120), `SDI_SRT_DIRECT_SOURCES` (filter path ID, kosong = semua caller SRT).
-
 Sumber tidak harus SRT. Halaman admin menyimpan satu URL untuk input **caller**. MediaMTX menarik URL itu. RTMP Univiso berbentuk `rtmp://IP/live/KODE?univiso_golivestream=1`. RTMP listen di port `1935`. Banyak stream caller dibedakan oleh path, bukan oleh banyak port listen.
 
 Input **listener** beda. MediaMTX hanya punya satu server SRT, bawaan UDP `8890`. Supaya tiap input bisa punya port sendiri, container operator menjalankan FFmpeg:
