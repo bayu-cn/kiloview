@@ -28,7 +28,9 @@ Output bertanda **Locked** tidak bisa diseret, diganti modenya, diganti audionya
 
 Dua soket BNC pada satu kartu SDI menampilkan gambar yang sama. SDI 1 dan SDI 2 adalah dua kartu yang berbeda, jadi bisa dua gambar berbeda. SRT dan NDI tidak memakai kartu itu. Gambarnya adalah sumber asli, bukan 1080i50.
 
-Kalau lapangan putus, sumber tetap menempel di output. Status menjadi **No signal**. Jangan Clear. Saat sinyal kembali, gambar nyambung sendiri tanpa diseret ulang.
+Kalau lapangan putus atau bonding drop, sumber tetap menempel di output. Status menjadi **No signal** atau sesaat **On air**. Operator restart pipeline output otomatis saat stall ~5 detik atau saat input **live** lagi (supaya SDI tidak tetap hitam meski preview sudah balik). Jangan Clear dulu. Output **Locked** mengikuti aturan lock.
+
+Kalau SDI masih hitam padahal input sudah live, tunggu beberapa detik; kalau belum pulih, drag ulang atau IT cek `docker logs operator`.
 
 Kalau preview halaman hilang sebentar lalu kembali, halaman menyambung ulang sendiri. Gambar di kabel SDI tidak mengikuti volume browser.
 

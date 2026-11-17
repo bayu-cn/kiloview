@@ -1538,7 +1538,7 @@ def pipeline_args(slot_id: str) -> list[str]:
     # membuat cabang audio gagal nyambung dan waktu pipeline tetap 0.
     return [
         cfg("GST_LAUNCH", "gst-launch-1.0"), "-e",
-        "rtspsrc", f"location={location}", "latency=200", "protocols=tcp", "name=src",
+        "rtspsrc", f"location={location}", f"latency={rtsp_output_latency_ms()}", "protocols=tcp", "name=src",
         "src.", "!", "application/x-rtp,media=video", "!", "decodebin", "!", "queue", "!", "video/x-raw", "!",
         *video_args(mode), "!",
         "decklinkvideosink", *sink_device_args(slot_id), f"mode={decklink_mode}", "sync=false",
@@ -1602,7 +1602,7 @@ def ndi_output_args(slot_id: str) -> list[str]:
     ndi_name = str(meta.get("ndi_name") or meta["label"]).replace('"', "")
     return [
         cfg("GST_LAUNCH", "gst-launch-1.0"), "-e",
-        "rtspsrc", f"location={location}", "latency=200", "protocols=tcp", "name=src",
+        "rtspsrc", f"location={location}", f"latency={rtsp_output_latency_ms()}", "protocols=tcp", "name=src",
         "src.", "!", "application/x-rtp,media=video", "!", "decodebin", "!", "queue", "!",
         "videoconvert", "!", "video/x-raw,format=UYVY", "!",
         "ndisinkcombiner", "name=combiner", "!", "ndisink", f'ndi-name="{ndi_name}"',
@@ -1891,6 +1891,8 @@ def webrtc_base() -> str:
 _rate_marks: dict[str, tuple[float, int]] = {}
 _flow_marks: dict[str, tuple[int, float]] = {}
 _stall_clear_since: dict[str, float] = {}
+_source_ready_prev: dict[str, bool] = {}
+_output_stall_since: dict[str, float] = {}
 
 
 def stall_seconds() -> float:
@@ -1898,6 +1900,13 @@ def stall_seconds() -> float:
         return max(2.0, float(cfg("SIGNAL_STALL_SECONDS", "5") or "5"))
     except (TypeError, ValueError):
         return 5.0
+
+
+def rtsp_output_latency_ms() -> int:
+    try:
+        return max(200, min(3000, int(cfg("RTSP_OUTPUT_LATENCY_MS", "600") or "600")))
+    except (TypeError, ValueError):
+        return 600
 
 
 def stall_clear_seconds() -> float:
@@ -1937,6 +1946,57 @@ def media_flow_active(name: str, received: int, path_open: bool) -> bool:
 
 def stall_auto_clear_enabled() -> bool:
     return cfg("SIGNAL_STALL_AUTO_CLEAR", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def restart_slot_pipeline(slot_id: str) -> None:
+    with lock:
+        if slot_id not in SLOTS or not state.get(slot_id, {}).get("source"):
+            return
+        run = runtime.setdefault(slot_id, fresh_runtime(True))
+        run["restarts"] = 0
+        run["preview_restarts"] = 0
+    start_pipeline(slot_id)
+
+
+def handle_output_signal_transitions(ready: dict[str, bool]) -> None:
+    """Restart output pipelines when a bonded source stalls or comes back (GStreamer may stay up but SDI black)."""
+    now = time.monotonic()
+    window = stall_seconds()
+    to_restart: set[str] = set()
+    with lock:
+        catalog_ids = [item["id"] for item in catalog]
+        for slot_id, slot in state.items():
+            source_id = slot.get("source")
+            if not source_id:
+                _output_stall_since.pop(slot_id, None)
+                continue
+            if ready.get(source_id, False):
+                _output_stall_since.pop(slot_id, None)
+                continue
+            run = runtime.get(slot_id)
+            proc = run.get("proc") if run else None
+            if (
+                run
+                and proc is not None
+                and proc.poll() is None
+                and run.get("status") == "playing"
+            ):
+                since = _output_stall_since.get(slot_id)
+                if since is None:
+                    _output_stall_since[slot_id] = now
+                elif now - since >= window:
+                    to_restart.add(slot_id)
+                    _output_stall_since.pop(slot_id, None)
+        for source_id in catalog_ids:
+            was = _source_ready_prev.get(source_id, ready.get(source_id, False))
+            now_ready = ready.get(source_id, False)
+            if not was and now_ready:
+                for slot_id, slot in state.items():
+                    if slot.get("source") == source_id:
+                        to_restart.add(slot_id)
+            _source_ready_prev[source_id] = now_ready
+    for slot_id in to_restart:
+        restart_slot_pipeline(slot_id)
 
 
 def output_pipeline_live(slot_id: str) -> bool:
@@ -2116,6 +2176,7 @@ def collect_stats() -> tuple[dict[str, bool], dict[str, dict]]:
 
 def snapshot() -> dict:
     ready, stats = collect_stats()
+    handle_output_signal_transitions(ready)
     maybe_auto_clear_stalled(ready)
     with lock:
         slots_copy = {slot_id: dict(slot) for slot_id, slot in state.items()}
