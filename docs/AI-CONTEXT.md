@@ -19,7 +19,7 @@ Keycloak **bukan** di mesin Z420. Itu layanan bersama di mesin lain, URL `https:
 | UDP media WebRTC | Langsung ke Z420, bukan lewat NPM. `webrtcAdditionalHosts` di server harus `172.17.20.34` |
 | Realm / client | `kiloview` / `kiloview` (confidential, standard flow) |
 | Grup admin | `IT` — boleh ubah input, menambah output, mengunci output, dan tab **SRTLA** (`srtla_rec`) |
-| Grup operator | `Transmission` — preview dan drag saja. Output terkunci tidak bisa diubah |
+| Grup operator | `Transmission` — preview, **display name** tiap input, drag saja. Path/URL/port tersembunyi. Output terkunci tidak bisa diubah |
 | SDI 1 | DeckLink 4K Extreme, persistent ID `40604f81` |
 | SDI 2 | DeckLink 4K Extreme, persistent ID `49205acf` |
 | Standar gambar SDI | `1080i50` |

@@ -395,7 +395,8 @@ function shell() {
       <div class="preview card-drag" draggable="true">
         <video data-preview="${esc(source.id)}" playsinline autoplay muted></video>
       </div>
-      <div class="card-foot">
+      <div class="card-foot card-foot-operator">
+        <span class="name" data-label="${esc(source.id)}"></span>
         <span class="badge" data-badge="${source.id}"></span>
       </div>
       <button type="button" class="stats" data-stats-source="${esc(source.id)}" hidden></button>
@@ -840,7 +841,7 @@ function applyRole() {
   const note = document.querySelector("#inputs-note");
   note.textContent = state.admin
     ? "Drag preview onto a slot to route. Use ⋮⋮ on a card to change list order."
-    : "Drag a preview onto an SDI slot.";
+    : "Each input shows its display name. Drag the preview onto an output.";
   if (!state.admin) {
     closeEditor();
     closeOutputEditor();

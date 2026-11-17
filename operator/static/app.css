@@ -156,6 +156,15 @@ body.is-operator .reorder-handle { display: none; }
   align-items: flex-start;
   gap: 8px 10px;
 }
+.card-foot-operator {
+  align-items: center;
+}
+.card-foot-operator .name {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
 .card-drag { display: grid; gap: 2px; cursor: grab; min-width: 0; flex: 1 1 180px; }
 .preview.card-drag { cursor: grab; }
 .preview.card-drag video { pointer-events: none; }
@@ -208,8 +217,8 @@ body.is-operator .editor,
 body.is-operator #add-source,
 body.is-operator #add-output,
 body.is-operator .remove-output,
-body.is-operator .card-drag .name,
 body.is-operator .card-drag .hint,
+body.is-operator [data-url],
 body.is-operator [data-edit] {
   display: none !important;
 }
