@@ -853,8 +853,12 @@ def occupied_ports(except_id: str | None = None, except_srtla: str | None = None
             continue
         found.add(int(item["port"]))
         found.add(int(item["metricsPort"]))
-        if item.get("feedMode") == "custom" and item.get("listenerPort"):
+        if not srtla_is_internal(item) and item.get("listenerPort"):
             found.add(int(item["listenerPort"]))
+        if not srtla_is_internal(item) and str(item.get("srtMode") or "").lower() == "listener":
+            fp = listen_port({"port": item.get("forwardPort")})
+            if fp:
+                found.add(fp)
     return found
 
 
@@ -894,12 +898,110 @@ def srtla_feed_mode(item: dict) -> str:
     return mode if mode in {"route", "custom"} else "route"
 
 
+def srtla_is_internal(item: dict) -> bool:
+    dest = str(item.get("destination") or "").strip().lower()
+    if dest == "external":
+        return False
+    if item.get("relay") == "mediamtx":
+        return False
+    if dest == "internal":
+        return True
+    if srtla_feed_mode(item) == "route":
+        return bool(str(item.get("sourceId") or "").strip())
+    return False
+
+
+def srtla_destination_label(item: dict) -> str:
+    if srtla_is_internal(item):
+        if item.get("relay") == "mediamtx":
+            return "internal"
+        return "internal"
+    return "external"
+
+
+def next_srtla_bridge_port(except_srtla: str | None = None) -> int:
+    used = occupied_ports(except_srtla=except_srtla)
+    port = 5100
+    while port in used or port in BLOCKED_PORTS:
+        port += 1
+        if port > 65000:
+            raise ValueError("No free internal port for SRTLA relay.")
+    return port
+
+
+def srt_optional_text(raw: object, max_len: int) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if len(text) > max_len or any(ord(char) < 32 for char in text):
+        raise ValueError("Stream ID or passphrase is invalid.")
+    return text
+
+
+def valid_srt_host(host: str) -> bool:
+    text = str(host or "").strip()
+    if not text or len(text) > 253:
+        return False
+    if any(char.isspace() or char in "/\\" for char in text):
+        return False
+    return True
+
+
+def build_external_srt_target(item: dict) -> str:
+    mode = str(item.get("srtMode") or "caller").strip().lower()
+    latency_us = int(item["latencyMs"]) * 1000
+    params: dict[str, str] = {
+        "transtype": "live",
+        "pkt_size": "1316",
+        "latency": str(latency_us),
+    }
+    if mode == "listener":
+        port = int(item["forwardPort"])
+        base = f"srt://0.0.0.0:{port}"
+        params["mode"] = "listener"
+    else:
+        host = str(item["remoteHost"]).strip()
+        port = int(item["remotePort"])
+        base = f"srt://{host}:{port}"
+        params["mode"] = "caller"
+    streamid = str(item.get("streamid") or "").strip()
+    if streamid:
+        params["streamid"] = streamid
+    passphrase = str(item.get("passphrase") or "").strip()
+    if passphrase:
+        params["passphrase"] = passphrase
+    return f"{base}?{urllib.parse.urlencode(params)}"
+
+
+def enrich_external_fields(item: dict) -> None:
+    if srtla_is_internal(item):
+        return
+    if item.get("remoteHost") or item.get("forwardPort"):
+        return
+    raw = str(item.get("forwardUrl") or "").strip()
+    if not raw:
+        return
+    if "://" not in raw:
+        raw = "srt://" + raw
+    parsed = urllib.parse.urlparse(raw)
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    mode = (query.get("mode") or ["caller"])[0].lower()
+    item["srtMode"] = "listener" if mode == "listener" else "caller"
+    if item["srtMode"] == "listener":
+        item["forwardPort"] = parsed.port
+    else:
+        item["remoteHost"] = parsed.hostname or ""
+        item["remotePort"] = parsed.port
+    item["streamid"] = (query.get("streamid") or [""])[0]
+    item["passphrase"] = (query.get("passphrase") or [""])[0]
+
+
 def srtla_tune_for_source(source_id: str) -> dict | None:
     return next(
         (
             item
             for item in srtla_receivers
-            if srtla_feed_mode(item) == "route" and item.get("sourceId") == source_id
+            if srtla_is_internal(item) and item.get("sourceId") == source_id
         ),
         None,
     )
@@ -942,7 +1044,7 @@ def forward_srt_target(raw: str) -> str:
 
 
 def srtla_listener_port(item: dict) -> int | None:
-    if srtla_feed_mode(item) == "custom":
+    if not srtla_is_internal(item):
         try:
             return int(item["listenerPort"])
         except (KeyError, TypeError, ValueError):
@@ -1037,6 +1139,7 @@ def load_srtla() -> None:
                 "id": receiver_id,
                 "label": label,
                 "port": port,
+                "destination": "internal",
                 "feedMode": "route",
                 "sourceId": source_id,
                 "latencyMs": latency,
@@ -1050,6 +1153,7 @@ def load_srtla() -> None:
                 "id": receiver_id,
                 "label": label,
                 "port": port,
+                "destination": "external" if relay == "forward" else "internal",
                 "feedMode": "custom",
                 "listenerPort": listener_port,
                 "relay": relay,
@@ -1092,9 +1196,11 @@ def normalize_srtla(payload: dict, current: dict | None = None) -> dict:
     port = listen_port(payload)
     if port is None:
         raise ValueError("SRTLA port is invalid.")
-    feed = str(payload.get("feedMode") or "route").strip().lower()
-    if feed not in {"route", "custom"}:
-        raise ValueError("Feed mode is invalid.")
+    dest_raw = str(payload.get("destination") or "").strip().lower()
+    if not dest_raw:
+        dest_raw = "internal" if str(payload.get("feedMode") or "route") == "route" else "external"
+    if dest_raw not in {"internal", "external"}:
+        raise ValueError("Output destination is invalid.")
     try:
         latency = int(payload.get("latencyMs") if payload.get("latencyMs") not in (None, "") else 2000)
         window = int(payload.get("lossmaxttl") if payload.get("lossmaxttl") not in (None, "") else 40)
@@ -1115,12 +1221,12 @@ def normalize_srtla(payload: dict, current: dict | None = None) -> dict:
         "id": receiver_id,
         "label": label,
         "port": port,
-        "feedMode": feed,
+        "destination": dest_raw,
         "latencyMs": latency,
         "lossmaxttl": window,
         "metricsPort": metrics,
     }
-    if feed == "route":
+    if dest_raw == "internal":
         source_id = str(payload.get("sourceId") or "").strip()
         source = next((item for item in catalog if item["id"] == source_id), None)
         if source is None or source.get("mode") != "listener":
@@ -1128,39 +1234,54 @@ def normalize_srtla(payload: dict, current: dict | None = None) -> dict:
         if port == int(source["port"]):
             raise ValueError("The SRTLA port and the listener input port must be different.")
         if any(
-            srtla_feed_mode(other) == "route"
+            srtla_is_internal(other)
             and other.get("sourceId") == source_id
             and other["id"] != receiver_id
             for other in srtla_receivers
         ):
             raise ValueError("That listener input already has an SRTLA receiver.")
+        base["feedMode"] = "route"
         base["sourceId"] = source_id
         return base
-    listener_port = listen_port({"port": payload.get("listenerPort")})
-    if listener_port is None:
-        raise ValueError("Custom listener port is invalid.")
-    if port == listener_port:
-        raise ValueError("The SRTLA port and the custom listener port must be different.")
-    if listener_port in BLOCKED_PORTS or listener_port in occupied_ports(except_srtla=receiver_id):
-        raise ValueError(f"Port {listener_port} is already used.")
-    relay = str(payload.get("relay") or "").strip().lower()
-    if relay not in {"mediamtx", "forward"}:
-        raise ValueError("Choose where the bonded stream should go.")
-    base["listenerPort"] = listener_port
-    base["relay"] = relay
-    if relay == "mediamtx":
-        path_id = str(payload.get("mediamtxPath") or "").strip()
-        if not valid_relay_path_id(path_id):
-            raise ValueError("MediaMTX path ID is invalid.")
-        if any(entry["id"] == path_id for entry in catalog):
-            raise ValueError("That path ID is already a Route input. Use Route feed instead.")
-        base["mediamtxPath"] = path_id
+    srt_mode = str(payload.get("srtMode") or "caller").strip().lower()
+    if srt_mode not in {"caller", "listener"}:
+        raise ValueError("Choose SRT caller or listener.")
+    bridge = int(current["listenerPort"]) if current and current.get("listenerPort") else 0
+    if not bridge or bridge in taken or bridge == port:
+        bridge = next_srtla_bridge_port(receiver_id)
+    if bridge in BLOCKED_PORTS:
+        raise ValueError("No free internal port for SRTLA relay.")
+    streamid = srt_optional_text(payload.get("streamid"), 512)
+    passphrase = srt_optional_text(payload.get("passphrase"), 128)
+    relay_item = {
+        **base,
+        "feedMode": "custom",
+        "relay": "forward",
+        "listenerPort": bridge,
+        "srtMode": srt_mode,
+        "streamid": streamid,
+        "passphrase": passphrase,
+    }
+    if srt_mode == "caller":
+        host = str(payload.get("remoteHost") or "").strip()
+        remote_port = listen_port({"port": payload.get("remotePort")})
+        if not valid_srt_host(host) or remote_port is None:
+            raise ValueError("Device IP and port are required for SRT caller.")
+        if remote_port == port:
+            raise ValueError("The SRTLA port and the device port must be different.")
+        relay_item["remoteHost"] = host
+        relay_item["remotePort"] = remote_port
     else:
-        forward = str(payload.get("forwardUrl") or "").strip()
-        if not valid_forward_srt(forward):
-            raise ValueError("Forward SRT URL is invalid.")
-        base["forwardUrl"] = forward_srt_target(forward)
-    return base
+        forward_port = listen_port({"port": payload.get("forwardPort")})
+        if forward_port is None:
+            raise ValueError("Listen port is required for SRT listener.")
+        if forward_port == port or forward_port == bridge:
+            raise ValueError("That port is already used by this receiver.")
+        if forward_port in BLOCKED_PORTS or forward_port in occupied_ports(except_srtla=receiver_id):
+            raise ValueError(f"Port {forward_port} is already used.")
+        relay_item["forwardPort"] = forward_port
+    relay_item["forwardUrl"] = build_external_srt_target(relay_item)
+    return relay_item
 
 
 def srtla_relay_args(item: dict) -> list[str] | None:
@@ -1262,7 +1383,7 @@ def restart_srtla_relay_later(receiver_id: str, generation: int) -> None:
         if not run or run["generation"] != generation:
             return
         item = next((entry for entry in srtla_receivers if entry["id"] == receiver_id), None)
-        if item is None or srtla_feed_mode(item) != "custom":
+        if item is None or srtla_is_internal(item):
             return
         start_srtla_relay(item)
 
@@ -1309,20 +1430,23 @@ def start_srtla(receiver_id: str) -> str | None:
     run["sample"] = None
     run["generation"] += 1
     generation = run["generation"]
-    feed = srtla_feed_mode(item)
     backend_error = None
-    if feed == "route":
-        source_id = str(item.get("sourceId") or "")
-        backend_error = start_listener(source_id)
+    if srtla_is_internal(item):
+        if item.get("relay") == "mediamtx":
+            backend_error = start_srtla_relay(item)
+            if backend_error:
+                run["error"] = backend_error
+                return backend_error
+            path_warning = ensure_publisher_path(str(item["mediamtxPath"]))
+            if path_warning:
+                backend_error = path_warning
+        else:
+            backend_error = start_listener(str(item.get("sourceId") or ""))
     else:
         backend_error = start_srtla_relay(item)
         if backend_error:
             run["error"] = backend_error
             return backend_error
-        if item.get("relay") == "mediamtx":
-            path_warning = ensure_publisher_path(str(item["mediamtxPath"]))
-            if path_warning:
-                backend_error = path_warning
     srt_port = srtla_listener_port(item)
     if srt_port is None:
         run["error"] = "The listener port for this receiver is not available."
@@ -1404,10 +1528,11 @@ def store_srtla(receiver_id: str | None, payload: dict) -> str | None:
                     srtla_receivers[index] = item
                     break
         save_srtla()
-        old_source = previous["sourceId"] if previous and srtla_feed_mode(previous) == "route" else None
+        old_source = previous["sourceId"] if previous and srtla_is_internal(previous) else None
         track = (
-            "feedMode", "port", "sourceId", "listenerPort", "relay",
+            "destination", "feedMode", "port", "sourceId", "listenerPort", "relay",
             "forwardUrl", "mediamtxPath", "metricsPort", "latencyMs", "lossmaxttl",
+            "srtMode", "remoteHost", "remotePort", "forwardPort", "streamid", "passphrase",
         )
         changed = previous is None or any(previous.get(key) != item.get(key) for key in track)
         listener_error = None
@@ -1415,13 +1540,13 @@ def store_srtla(receiver_id: str | None, payload: dict) -> str | None:
         if changed and old_source and old_source != item.get("sourceId"):
             listener_error = restart_listener_if_present(old_source)
         if changed:
-            if srtla_feed_mode(item) == "route":
+            if srtla_is_internal(item) and item.get("relay") != "mediamtx":
                 listener_error = restart_listener_if_present(item["sourceId"]) or listener_error
             try:
                 write_mediamtx()
             except OSError:
                 pass
-            if srtla_feed_mode(item) == "custom" and item.get("relay") == "mediamtx":
+            if item.get("relay") == "mediamtx" and item.get("mediamtxPath"):
                 mediamtx_error = ensure_publisher_path(str(item["mediamtxPath"]))
             srtla_error = start_srtla(item["id"])
         else:
@@ -1437,8 +1562,8 @@ def remove_srtla(receiver_id: str) -> None:
         stop_srtla(receiver_id)
         srtla_receivers[:] = [entry for entry in srtla_receivers if entry["id"] != receiver_id]
         save_srtla()
-        if srtla_feed_mode(item) == "route":
-            restart_listener_if_present(item["sourceId"])
+        if srtla_is_internal(item):
+            restart_listener_if_present(item.get("sourceId") or "")
         try:
             write_mediamtx()
         except OSError:
@@ -1601,7 +1726,7 @@ def srtla_public() -> dict:
         sources = {entry["id"]: entry for entry in catalog}
 
         def backend_error(entry: dict) -> str | None:
-            if srtla_feed_mode(entry) == "route":
+            if srtla_is_internal(entry):
                 return (listeners.get(entry.get("sourceId") or "") or {}).get("error")
             return (srtla_relays.get(entry["id"]) or {}).get("error")
     host = srtla_advertise()
@@ -1615,18 +1740,28 @@ def srtla_public() -> dict:
             if text:
                 parsed = parse_metrics(text)
                 samples[item["id"]] = apply_rates(run["sample"], parsed)
-        feed = srtla_feed_mode(item)
-        if feed == "route":
+        enrich_external_fields(item)
+        if srtla_is_internal(item):
             source = sources.get(item.get("sourceId") or "") or {}
             feed_label = source.get("label") or item.get("sourceId") or ""
             feed_port = source.get("port")
-            feed_detail = f"Route input · {feed_label}"
-        else:
+            feed_detail = f"Internal · {feed_label}"
+            dest = "internal"
+        elif item.get("relay") == "mediamtx":
             feed_port = item.get("listenerPort")
-            if item.get("relay") == "forward":
-                feed_detail = f"Custom · forward to {item.get('forwardUrl') or '—'}"
+            feed_detail = f"Internal path · {item.get('mediamtxPath') or '—'}"
+            dest = "internal"
+        else:
+            feed_port = item.get("forwardPort") or item.get("listenerPort")
+            mode = str(item.get("srtMode") or "caller")
+            if mode == "listener":
+                feed_detail = f"Another device · SRT listener UDP {item.get('forwardPort') or '—'}"
             else:
-                feed_detail = f"Custom · MediaMTX path {item.get('mediamtxPath') or '—'}"
+                feed_detail = (
+                    f"Another device · SRT caller "
+                    f"{item.get('remoteHost') or '?'}:{item.get('remotePort') or '?'}"
+                )
+            dest = "external"
         uptime = None
         if run["running"] and run["started"]:
             uptime = int(time.monotonic() - float(run["started"]))
@@ -1635,8 +1770,15 @@ def srtla_public() -> dict:
             "id": item["id"],
             "label": item["label"],
             "port": item["port"],
-            "feedMode": feed,
+            "destination": dest,
+            "feedMode": srtla_feed_mode(item),
+            "srtMode": item.get("srtMode") or "",
             "sourceId": item.get("sourceId") or "",
+            "remoteHost": item.get("remoteHost") or "",
+            "remotePort": item.get("remotePort"),
+            "forwardPort": item.get("forwardPort"),
+            "streamid": item.get("streamid") or "",
+            "passphrase": item.get("passphrase") or "",
             "listenerPort": item.get("listenerPort"),
             "relay": item.get("relay") or "",
             "mediamtxPath": item.get("mediamtxPath") or "",
