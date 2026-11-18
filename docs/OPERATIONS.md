@@ -95,8 +95,11 @@ Mode video dan peta audio hanya untuk SDI. SRT dan NDI mengirim sumber asli.
 
 Tab **SRTLA** hanya muncul untuk grup `IT`. Dipakai kalau encoder lapangan mengirim **SRTLA** (bukan SRT biasa ke port listener).
 
-1. Buat dulu **input Listener** di tab Route (misalnya path `bond-a`, listen port `9101`). Port listener dan port SRTLA publik **harus beda**.
-2. Buka tab **SRTLA** → **Add receiver**.
+1. Pilih **Feed**:
+   - **Route listener input** (lama): buat dulu input **Listener** di tab Route; pilih input itu. Stream masuk Route seperti biasa.
+   - **Custom listener port**: isi port SRT lokal (bukan kartu Inputs). Lalu pilih **MediaMTX path** (path ID baru + preview/drag di Route) atau **Forward SRT URL** (kirim MPEG-TS ke perangkat lain, tanpa lewat drag Route).
+2. Port UDP **publik** SRTLA dan port **listener** (Route atau custom) **harus beda**.
+3. Buka tab **SRTLA** → **Add receiver**.
 3. Isi **Public UDP port** — ini yang dibuka di firewall dan yang dipanggil encoder (bukan port listener).
 4. Pilih **Listener input** yang barusan dibuat.
 5. **SRT latency** dan **Reorder window** — mulai dari `2000 ms` dan `40`. Nilai ini juga diterapkan ke FFmpeg listener untuk input itu (bonding butuh jendela lebih lebar).

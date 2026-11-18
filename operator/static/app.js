@@ -784,7 +784,10 @@ function usedSrtlaPorts() {
   Object.values(state.slots).forEach((slot) => {
     if (slot.kind === "srt" && slot.srtMode === "listener" && slot.port) used.add(slot.port);
   });
-  (srtlaState?.receivers || []).forEach((item) => used.add(item.port));
+  (srtlaState?.receivers || []).forEach((item) => {
+    used.add(item.port);
+    if (item.listenerPort) used.add(item.listenerPort);
+  });
   return used;
 }
 
@@ -795,12 +798,34 @@ function nextSrtlaPort() {
   return port;
 }
 
+function nextSrtlaListenerPort() {
+  const used = usedSrtlaPorts();
+  let port = 5100;
+  while (used.has(port)) port += 1;
+  return port;
+}
+
+function updateSrtlaFeedFields() {
+  const feed = srtlaForm.elements.feedMode.value;
+  const relay = srtlaForm.elements.relay.value;
+  const custom = feed === "custom";
+  srtlaForm.querySelector('[data-field="srtla-route"]').hidden = custom;
+  srtlaForm.querySelector('[data-field="srtla-custom-port"]').hidden = !custom;
+  srtlaForm.querySelector('[data-field="srtla-relay"]').hidden = !custom;
+  srtlaForm.querySelector('[data-field="srtla-mediamtx"]').hidden = !custom || relay !== "mediamtx";
+  srtlaForm.querySelector('[data-field="srtla-forward"]').hidden = !custom || relay !== "forward";
+  srtlaForm.elements.sourceId.required = !custom;
+  srtlaForm.elements.listenerPort.required = custom;
+  srtlaForm.elements.mediamtxPath.required = custom && relay === "mediamtx";
+  srtlaForm.elements.forwardUrl.required = custom && relay === "forward";
+}
+
 function fillSrtlaSources(selected) {
   const select = srtlaForm.elements.sourceId;
   const editing = srtlaForm.dataset.editing;
   const used = new Set(
     (srtlaState?.receivers || [])
-      .filter((item) => item.id !== editing)
+      .filter((item) => item.id !== editing && item.feedMode !== "custom")
       .map((item) => item.sourceId),
   );
   const options = state.sources.filter((source) => source.mode === "listener" && !used.has(source.id));
@@ -808,12 +833,18 @@ function fillSrtlaSources(selected) {
     `<option value="${esc(source.id)}">${esc(source.label)} · UDP ${source.port}</option>`
   )).join("");
   if (selected && options.some((source) => source.id === selected)) select.value = selected;
-  srtlaFormNote.textContent = options.length
-    ? (srtlaState?.advertise
+  const feed = srtlaForm.elements.feedMode.value;
+  if (feed === "route") {
+    srtlaFormNote.textContent = options.length
+      ? (srtlaState?.advertise
+        ? `Encoder URL uses ${srtlaState.advertise} and the public UDP port.`
+        : "Set SRTLA_PUBLIC_HOST in config.env to show the encoder URL on each card.")
+      : "Add a listener input under Route, or switch Feed to Custom listener port.";
+  } else {
+    srtlaFormNote.textContent = srtlaState?.advertise
       ? `Encoder URL uses ${srtlaState.advertise} and the public UDP port.`
-      : "Set SRTLA_PUBLIC_HOST in config.env to show the encoder URL on each card.")
-    : "Add a listener input first. SRTLA only feeds an input that is already waiting on a port.";
-  select.required = options.length > 0;
+      : "Set SRTLA_PUBLIC_HOST in config.env to show the encoder URL on each card.";
+  }
 }
 
 function openSrtlaEditor(item) {
@@ -823,7 +854,13 @@ function openSrtlaEditor(item) {
   srtlaForm.elements.port.value = item ? item.port : nextSrtlaPort();
   srtlaForm.elements.latencyMs.value = item ? item.latencyMs : 2000;
   srtlaForm.elements.lossmaxttl.value = item ? item.lossmaxttl : 40;
-  fillSrtlaSources(item ? item.sourceId : "");
+  srtlaForm.elements.feedMode.value = item?.feedMode || "route";
+  srtlaForm.elements.relay.value = item?.relay || "mediamtx";
+  srtlaForm.elements.listenerPort.value = item?.listenerPort ?? nextSrtlaListenerPort();
+  srtlaForm.elements.mediamtxPath.value = item?.mediamtxPath || "";
+  srtlaForm.elements.forwardUrl.value = item?.forwardUrl || "";
+  fillSrtlaSources(item?.sourceId || "");
+  updateSrtlaFeedFields();
   srtlaForm.elements.label.focus();
 }
 
@@ -1131,20 +1168,37 @@ document.querySelector("#view-srtla").addEventListener("click", () => {
 });
 document.querySelector("#add-srtla").addEventListener("click", () => openSrtlaEditor(null));
 document.querySelector("#cancel-srtla").addEventListener("click", closeSrtlaEditor);
+srtlaForm.elements.feedMode.addEventListener("change", () => {
+  fillSrtlaSources(srtlaForm.elements.sourceId.value);
+  updateSrtlaFeedFields();
+});
+srtlaForm.elements.relay.addEventListener("change", updateSrtlaFeedFields);
 srtlaForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  if (!srtlaForm.elements.sourceId.value) {
-    window.alert("Add a listener input first.");
+  const feedMode = srtlaForm.elements.feedMode.value;
+  if (feedMode === "route" && !srtlaForm.elements.sourceId.value) {
+    window.alert("Choose a listener input, or switch Feed to Custom listener port.");
     return;
   }
   const editing = srtlaForm.dataset.editing;
   const body = {
     label: srtlaForm.elements.label.value.trim(),
     port: Number(srtlaForm.elements.port.value),
-    sourceId: srtlaForm.elements.sourceId.value,
+    feedMode,
     latencyMs: Number(srtlaForm.elements.latencyMs.value),
     lossmaxttl: Number(srtlaForm.elements.lossmaxttl.value),
   };
+  if (feedMode === "route") {
+    body.sourceId = srtlaForm.elements.sourceId.value;
+  } else {
+    body.listenerPort = Number(srtlaForm.elements.listenerPort.value);
+    body.relay = srtlaForm.elements.relay.value;
+    if (body.relay === "mediamtx") {
+      body.mediamtxPath = srtlaForm.elements.mediamtxPath.value.trim();
+    } else {
+      body.forwardUrl = srtlaForm.elements.forwardUrl.value.trim();
+    }
+  }
   const path = editing ? `/api/srtla/${encodeURIComponent(editing)}` : "/api/srtla";
   try {
     const next = await api(path, { method: "POST", body: JSON.stringify(body) });

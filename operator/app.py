@@ -234,7 +234,7 @@ def operator_groups() -> set[str]:
 
 
 def sources() -> list[str]:
-    return [item["id"] for item in catalog]
+    return [item["id"] for item in catalog] + [item["id"] for item in srtla_virtual_sources()]
 
 
 def sources_path() -> Path:
@@ -245,6 +245,7 @@ SOURCE_SCHEMES = {"srt", "rtsp", "rtsps", "rtmp", "rtmps", "udp", "http", "https
 LOCAL_HOSTS = {"", "0.0.0.0", "127.0.0.1", "localhost", "::1"}
 BLOCKED_PORTS = {80, 8090, 8189, 8554, 8888, 8889, 8890, 9997, 1935}
 listeners: dict[str, dict] = {}
+srtla_relays: dict[str, dict] = {}
 srtla_receivers: list[dict] = []
 srtla_runs: dict[str, dict] = {}
 SRTLA_BIN = "/usr/local/bin/srtla_rec"
@@ -436,6 +437,18 @@ def write_mediamtx() -> None:
             "    sourceOnDemand: false",
             "",
         ])
+    for item in srtla_receivers:
+        if item.get("feedMode") != "custom" or item.get("relay") != "mediamtx":
+            continue
+        path_id = str(item.get("mediamtxPath") or "").strip()
+        if not path_id:
+            continue
+        lines.extend([
+            f"  {path_id}:",
+            "    source: publisher",
+            "    sourceOnDemand: false",
+            "",
+        ])
     lines.append("  # Preview operator. Diisi GStreamer, bukan SRT.")
     for slot_id in SLOTS:
         lines.extend([
@@ -487,12 +500,16 @@ def ensure_sources() -> None:
 
 
 def publish_output(slot_id: str) -> str | None:
-    quoted = urllib.parse.quote(slot_id, safe="")
+    return ensure_publisher_path(slot_id)
+
+
+def ensure_publisher_path(path_id: str) -> str | None:
+    quoted = urllib.parse.quote(path_id, safe="")
     payload = {"source": "publisher", "sourceOnDemand": False}
     code, detail = mediamtx_call("POST", f"/v3/config/paths/add/{quoted}", payload)
     if code in (200, 201, 204) or "exist" in detail.lower():
         return None
-    return f"MediaMTX did not accept {slot_id}: {detail or code}"
+    return f"MediaMTX did not accept {path_id}: {detail or code}"
 
 
 def ensure_outputs() -> None:
@@ -836,6 +853,8 @@ def occupied_ports(except_id: str | None = None, except_srtla: str | None = None
             continue
         found.add(int(item["port"]))
         found.add(int(item["metricsPort"]))
+        if item.get("feedMode") == "custom" and item.get("listenerPort"):
+            found.add(int(item["listenerPort"]))
     return found
 
 
@@ -870,8 +889,72 @@ def srtla_advertise() -> str:
     return host
 
 
+def srtla_feed_mode(item: dict) -> str:
+    mode = str(item.get("feedMode") or "route").strip().lower()
+    return mode if mode in {"route", "custom"} else "route"
+
+
 def srtla_tune_for_source(source_id: str) -> dict | None:
-    return next((item for item in srtla_receivers if item["sourceId"] == source_id), None)
+    return next(
+        (
+            item
+            for item in srtla_receivers
+            if srtla_feed_mode(item) == "route" and item.get("sourceId") == source_id
+        ),
+        None,
+    )
+
+
+def valid_relay_path_id(path_id: str) -> bool:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,40}", path_id):
+        return False
+    if path_id in SLOTS or re.fullmatch(r"(sdi|srt|ndi)\d+", path_id.lower()):
+        return False
+    return True
+
+
+def valid_forward_srt(url: str) -> bool:
+    text = str(url or "").strip()
+    if not text or len(text) > 300:
+        return False
+    if "://" not in text:
+        text = "srt://" + text
+    parsed = urllib.parse.urlparse(text)
+    return parsed.scheme == "srt" and bool(parsed.hostname) and bool(parsed.port)
+
+
+def forward_srt_target(raw: str) -> str:
+    text = str(raw or "").strip()
+    if "://" not in text:
+        text = "srt://" + text
+    parsed = urllib.parse.urlparse(text)
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    query.setdefault("mode", ["caller"])
+    query.setdefault("transtype", ["live"])
+    query.setdefault("pkt_size", ["1316"])
+    if "latency" not in query:
+        query["latency"] = ["120000"]
+    flat = {key: values[-1] for key, values in query.items() if values}
+    new_query = urllib.parse.urlencode(flat)
+    return urllib.parse.urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment)
+    )
+
+
+def srtla_listener_port(item: dict) -> int | None:
+    if srtla_feed_mode(item) == "custom":
+        try:
+            return int(item["listenerPort"])
+        except (KeyError, TypeError, ValueError):
+            return None
+    source_id = str(item.get("sourceId") or "").strip()
+    source = next(
+        (entry for entry in catalog if entry["id"] == source_id and entry.get("mode") == "listener"),
+        None,
+    )
+    if not source:
+        return None
+    return int(source["port"])
 
 
 def save_srtla() -> None:
@@ -897,6 +980,7 @@ def load_srtla() -> None:
     seen_ids: set[str] = set()
     seen_ports: set[int] = set()
     seen_sources: set[str] = set()
+    seen_listener_ports: set[int] = set()
     for item in raw if isinstance(raw, list) else []:
         if not isinstance(item, dict):
             continue
@@ -906,7 +990,12 @@ def load_srtla() -> None:
         label = str(item.get("label") or receiver_id).strip()
         port = listen_port(item)
         metrics = listen_port({"port": item.get("metricsPort")})
+        feed = srtla_feed_mode(item)
         source_id = str(item.get("sourceId") or "").strip()
+        listener_port = listen_port({"port": item.get("listenerPort")})
+        relay = str(item.get("relay") or "").strip().lower()
+        mediamtx_path = str(item.get("mediamtxPath") or "").strip()
+        forward_url = str(item.get("forwardUrl") or "").strip()
         try:
             latency = int(item.get("latencyMs") or 2000)
             window = int(item.get("lossmaxttl") or 40)
@@ -915,7 +1004,6 @@ def load_srtla() -> None:
         if (
             port is None
             or metrics is None
-            or not source_id
             or not label
             or len(label) > 48
             or not 120 <= latency <= 8000
@@ -923,22 +1011,57 @@ def load_srtla() -> None:
             or port == metrics
             or port in seen_ports
             or metrics in seen_ports
-            or source_id in seen_sources
         ):
+            continue
+        if feed == "route":
+            if not source_id or source_id in seen_sources:
+                continue
+        elif feed == "custom":
+            if listener_port is None or listener_port in seen_listener_ports:
+                continue
+            if relay not in {"mediamtx", "forward"}:
+                continue
+            if relay == "mediamtx":
+                if not valid_relay_path_id(mediamtx_path):
+                    continue
+            elif not valid_forward_srt(forward_url):
+                continue
+        else:
             continue
         seen_ids.add(receiver_id)
         seen_ports.add(port)
         seen_ports.add(metrics)
-        seen_sources.add(source_id)
-        loaded.append({
-            "id": receiver_id,
-            "label": label,
-            "port": port,
-            "sourceId": source_id,
-            "latencyMs": latency,
-            "lossmaxttl": window,
-            "metricsPort": metrics,
-        })
+        if feed == "route":
+            seen_sources.add(source_id)
+            entry = {
+                "id": receiver_id,
+                "label": label,
+                "port": port,
+                "feedMode": "route",
+                "sourceId": source_id,
+                "latencyMs": latency,
+                "lossmaxttl": window,
+                "metricsPort": metrics,
+            }
+        else:
+            seen_listener_ports.add(listener_port)
+            seen_ports.add(listener_port)
+            entry = {
+                "id": receiver_id,
+                "label": label,
+                "port": port,
+                "feedMode": "custom",
+                "listenerPort": listener_port,
+                "relay": relay,
+                "latencyMs": latency,
+                "lossmaxttl": window,
+                "metricsPort": metrics,
+            }
+            if relay == "mediamtx":
+                entry["mediamtxPath"] = mediamtx_path
+            else:
+                entry["forwardUrl"] = forward_srt_target(forward_url)
+        loaded.append(entry)
     srtla_receivers = loaded
 
 
@@ -969,10 +1092,9 @@ def normalize_srtla(payload: dict, current: dict | None = None) -> dict:
     port = listen_port(payload)
     if port is None:
         raise ValueError("SRTLA port is invalid.")
-    source_id = str(payload.get("sourceId") or "").strip()
-    source = next((item for item in catalog if item["id"] == source_id), None)
-    if source is None or source.get("mode") != "listener":
-        raise ValueError("Choose a listener input. Add one under Inputs first.")
+    feed = str(payload.get("feedMode") or "route").strip().lower()
+    if feed not in {"route", "custom"}:
+        raise ValueError("Feed mode is invalid.")
     try:
         latency = int(payload.get("latencyMs") if payload.get("latencyMs") not in (None, "") else 2000)
         window = int(payload.get("lossmaxttl") if payload.get("lossmaxttl") not in (None, "") else 40)
@@ -983,28 +1105,170 @@ def normalize_srtla(payload: dict, current: dict | None = None) -> dict:
     if not 10 <= window <= 200:
         raise ValueError("Reorder window must be between 10 and 200.")
     receiver_id = current["id"] if current else next_srtla_id()
-    if port == int(source["port"]):
-        raise ValueError("The SRTLA port and the listener input port must be different.")
     if port in BLOCKED_PORTS or port in occupied_ports(except_srtla=receiver_id):
         raise ValueError(f"Port {port} is already used.")
-    if any(other["sourceId"] == source_id and other["id"] != receiver_id for other in srtla_receivers):
-        raise ValueError("That listener input already has an SRTLA receiver.")
     metrics = int(current["metricsPort"]) if current else 0
     taken = occupied_ports(except_srtla=receiver_id)
     if not metrics or metrics == port or metrics in BLOCKED_PORTS or metrics in taken:
         metrics = next_metrics_port(receiver_id, {port})
-    return {
+    base = {
         "id": receiver_id,
         "label": label,
         "port": port,
-        "sourceId": source_id,
+        "feedMode": feed,
         "latencyMs": latency,
         "lossmaxttl": window,
         "metricsPort": metrics,
     }
+    if feed == "route":
+        source_id = str(payload.get("sourceId") or "").strip()
+        source = next((item for item in catalog if item["id"] == source_id), None)
+        if source is None or source.get("mode") != "listener":
+            raise ValueError("Choose a listener input. Add one under Inputs first.")
+        if port == int(source["port"]):
+            raise ValueError("The SRTLA port and the listener input port must be different.")
+        if any(
+            srtla_feed_mode(other) == "route"
+            and other.get("sourceId") == source_id
+            and other["id"] != receiver_id
+            for other in srtla_receivers
+        ):
+            raise ValueError("That listener input already has an SRTLA receiver.")
+        base["sourceId"] = source_id
+        return base
+    listener_port = listen_port({"port": payload.get("listenerPort")})
+    if listener_port is None:
+        raise ValueError("Custom listener port is invalid.")
+    if port == listener_port:
+        raise ValueError("The SRTLA port and the custom listener port must be different.")
+    if listener_port in BLOCKED_PORTS or listener_port in occupied_ports(except_srtla=receiver_id):
+        raise ValueError(f"Port {listener_port} is already used.")
+    relay = str(payload.get("relay") or "").strip().lower()
+    if relay not in {"mediamtx", "forward"}:
+        raise ValueError("Choose where the bonded stream should go.")
+    base["listenerPort"] = listener_port
+    base["relay"] = relay
+    if relay == "mediamtx":
+        path_id = str(payload.get("mediamtxPath") or "").strip()
+        if not valid_relay_path_id(path_id):
+            raise ValueError("MediaMTX path ID is invalid.")
+        if any(entry["id"] == path_id for entry in catalog):
+            raise ValueError("That path ID is already a Route input. Use Route feed instead.")
+        base["mediamtxPath"] = path_id
+    else:
+        forward = str(payload.get("forwardUrl") or "").strip()
+        if not valid_forward_srt(forward):
+            raise ValueError("Forward SRT URL is invalid.")
+        base["forwardUrl"] = forward_srt_target(forward)
+    return base
+
+
+def srtla_relay_args(item: dict) -> list[str] | None:
+    binary = "/usr/bin/ffmpeg"
+    if not Path(binary).is_file():
+        return None
+    port = int(item["listenerPort"])
+    latency = int(item["latencyMs"]) * 1000
+    reorder = f"&lossmaxttl={int(item['lossmaxttl'])}"
+    listen = f"srt://0.0.0.0:{port}?mode=listener&transtype=live&latency={latency}{reorder}"
+    if item.get("relay") == "forward":
+        target = item["forwardUrl"]
+        return [
+            "nice", "-n", "12",
+            binary, "-nostdin", "-hide_banner", "-loglevel", "warning",
+            "-fflags", "nobuffer",
+            "-analyzeduration", "2000000",
+            "-probesize", "2000000",
+            "-i", listen,
+            "-c", "copy",
+            "-f", "mpegts",
+            target,
+        ]
+    target = cfg("MEDIAMTX_SRT", "srt://127.0.0.1:8890").rstrip("/")
+    publish = f"{target}?streamid=publish:{item['mediamtxPath']}&pkt_size=1316"
+    return [
+        "nice", "-n", "12",
+        binary, "-nostdin", "-hide_banner", "-loglevel", "warning",
+        "-fflags", "nobuffer",
+        "-analyzeduration", "2000000",
+        "-probesize", "2000000",
+        "-i", listen,
+        "-c", "copy",
+        "-f", "mpegts",
+        publish,
+    ]
+
+
+def stop_srtla_relay(receiver_id: str) -> None:
+    run = srtla_relays.get(receiver_id)
+    if not run:
+        return
+    run["generation"] += 1
+    proc = run.get("proc")
+    run["proc"] = None
+    if proc is not None and proc.poll() is None:
+        kill_process(proc)
+    srtla_relays.pop(receiver_id, None)
+
+
+def start_srtla_relay(item: dict) -> str | None:
+    receiver_id = item["id"]
+    stop_srtla_relay(receiver_id)
+    args = srtla_relay_args(item)
+    if not args:
+        return "This receiver needs FFmpeg in the operator image."
+    run = srtla_relays.setdefault(receiver_id, {"proc": None, "generation": 0, "error": None})
+    run["generation"] += 1
+    generation = run["generation"]
+    LOG_DIR.mkdir(exist_ok=True)
+    log_path = LOG_DIR / f"{receiver_id}-relay.log"
+    log = open(log_path, "w", encoding="utf-8")
+    log.write(" ".join(args) + "\n\n")
+    log.flush()
+    try:
+        proc = subprocess.Popen(
+            args,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            start_new_session=os.name == "posix",
+        )
+    except OSError as exc:
+        log.write(f"\nRelay failed to start: {exc}\n")
+        log.close()
+        run["error"] = str(exc)
+        return str(exc)
+    log.close()
+    run["proc"] = proc
+    run["error"] = None
+    threading.Thread(target=watch_srtla_relay, args=(receiver_id, generation, proc), daemon=True).start()
+    return None
+
+
+def watch_srtla_relay(receiver_id: str, generation: int, proc: subprocess.Popen) -> None:
+    proc.wait()
+    with lock:
+        run = srtla_relays.get(receiver_id)
+        if not run or run["generation"] != generation or run.get("proc") is not proc:
+            return
+        run["proc"] = None
+        run["error"] = useful_log(receiver_id, "-relay") or f"Relay stopped (code {proc.returncode})"
+        threading.Thread(target=restart_srtla_relay_later, args=(receiver_id, generation), daemon=True).start()
+
+
+def restart_srtla_relay_later(receiver_id: str, generation: int) -> None:
+    time.sleep(2)
+    with lock:
+        run = srtla_relays.get(receiver_id)
+        if not run or run["generation"] != generation:
+            return
+        item = next((entry for entry in srtla_receivers if entry["id"] == receiver_id), None)
+        if item is None or srtla_feed_mode(item) != "custom":
+            return
+        start_srtla_relay(item)
 
 
 def stop_srtla(receiver_id: str) -> None:
+    stop_srtla_relay(receiver_id)
     run = srtla_runs.get(receiver_id)
     if not run:
         return
@@ -1045,14 +1309,25 @@ def start_srtla(receiver_id: str) -> str | None:
     run["sample"] = None
     run["generation"] += 1
     generation = run["generation"]
-    source = next(
-        (entry for entry in catalog if entry["id"] == item["sourceId"] and entry.get("mode") == "listener"),
-        None,
-    )
-    if source is None:
-        run["error"] = "The listener input this receiver feeds is missing."
+    feed = srtla_feed_mode(item)
+    backend_error = None
+    if feed == "route":
+        source_id = str(item.get("sourceId") or "")
+        backend_error = start_listener(source_id)
+    else:
+        backend_error = start_srtla_relay(item)
+        if backend_error:
+            run["error"] = backend_error
+            return backend_error
+        if item.get("relay") == "mediamtx":
+            path_warning = ensure_publisher_path(str(item["mediamtxPath"]))
+            if path_warning:
+                backend_error = path_warning
+    srt_port = srtla_listener_port(item)
+    if srt_port is None:
+        run["error"] = "The listener port for this receiver is not available."
         return run["error"]
-    args = srtla_args(item, int(source["port"]))
+    args = srtla_args(item, srt_port)
     if args is None:
         run["error"] = "srtla_rec is not in this image. Rebuild the operator container."
         return run["error"]
@@ -1075,10 +1350,10 @@ def start_srtla(receiver_id: str) -> str | None:
         return str(exc)
     log.close()
     run["proc"] = proc
-    run["error"] = None
+    run["error"] = backend_error
     run["started"] = time.monotonic()
     threading.Thread(target=watch_srtla, args=(receiver_id, generation, proc), daemon=True).start()
-    return None
+    return backend_error
 
 
 def watch_srtla(receiver_id: str, generation: int, proc: subprocess.Popen) -> None:
@@ -1129,20 +1404,29 @@ def store_srtla(receiver_id: str | None, payload: dict) -> str | None:
                     srtla_receivers[index] = item
                     break
         save_srtla()
-        old_source = previous["sourceId"] if previous else None
-        changed = previous is None or any(
-            previous[key] != item[key] for key in ("port", "sourceId", "metricsPort", "latencyMs", "lossmaxttl")
+        old_source = previous["sourceId"] if previous and srtla_feed_mode(previous) == "route" else None
+        track = (
+            "feedMode", "port", "sourceId", "listenerPort", "relay",
+            "forwardUrl", "mediamtxPath", "metricsPort", "latencyMs", "lossmaxttl",
         )
+        changed = previous is None or any(previous.get(key) != item.get(key) for key in track)
         listener_error = None
-        if changed and old_source and old_source != item["sourceId"]:
+        mediamtx_error = None
+        if changed and old_source and old_source != item.get("sourceId"):
             listener_error = restart_listener_if_present(old_source)
         if changed:
-            current_error = restart_listener_if_present(item["sourceId"])
-            listener_error = listener_error or current_error
+            if srtla_feed_mode(item) == "route":
+                listener_error = restart_listener_if_present(item["sourceId"]) or listener_error
+            try:
+                write_mediamtx()
+            except OSError:
+                pass
+            if srtla_feed_mode(item) == "custom" and item.get("relay") == "mediamtx":
+                mediamtx_error = ensure_publisher_path(str(item["mediamtxPath"]))
             srtla_error = start_srtla(item["id"])
         else:
             srtla_error = None
-    return listener_error or srtla_error
+    return listener_error or mediamtx_error or srtla_error
 
 
 def remove_srtla(receiver_id: str) -> None:
@@ -1153,7 +1437,12 @@ def remove_srtla(receiver_id: str) -> None:
         stop_srtla(receiver_id)
         srtla_receivers[:] = [entry for entry in srtla_receivers if entry["id"] != receiver_id]
         save_srtla()
-        restart_listener_if_present(item["sourceId"])
+        if srtla_feed_mode(item) == "route":
+            restart_listener_if_present(item["sourceId"])
+        try:
+            write_mediamtx()
+        except OSError:
+            pass
 
 
 def scrape_metrics(port: int) -> str | None:
@@ -1310,10 +1599,11 @@ def srtla_public() -> dict:
                 "sample": run.get("sample"),
             }
         sources = {entry["id"]: entry for entry in catalog}
-        listener_errors = {
-            source_id: (listeners.get(source_id) or {}).get("error")
-            for source_id in {item["sourceId"] for item in items}
-        }
+
+        def backend_error(entry: dict) -> str | None:
+            if srtla_feed_mode(entry) == "route":
+                return (listeners.get(entry.get("sourceId") or "") or {}).get("error")
+            return (srtla_relays.get(entry["id"]) or {}).get("error")
     host = srtla_advertise()
     receivers = []
     samples = {}
@@ -1325,7 +1615,18 @@ def srtla_public() -> dict:
             if text:
                 parsed = parse_metrics(text)
                 samples[item["id"]] = apply_rates(run["sample"], parsed)
-        source = sources.get(item["sourceId"]) or {}
+        feed = srtla_feed_mode(item)
+        if feed == "route":
+            source = sources.get(item.get("sourceId") or "") or {}
+            feed_label = source.get("label") or item.get("sourceId") or ""
+            feed_port = source.get("port")
+            feed_detail = f"Route input · {feed_label}"
+        else:
+            feed_port = item.get("listenerPort")
+            if item.get("relay") == "forward":
+                feed_detail = f"Custom · forward to {item.get('forwardUrl') or '—'}"
+            else:
+                feed_detail = f"Custom · MediaMTX path {item.get('mediamtxPath') or '—'}"
         uptime = None
         if run["running"] and run["started"]:
             uptime = int(time.monotonic() - float(run["started"]))
@@ -1334,9 +1635,14 @@ def srtla_public() -> dict:
             "id": item["id"],
             "label": item["label"],
             "port": item["port"],
-            "sourceId": item["sourceId"],
-            "sourceLabel": source.get("label") or item["sourceId"],
-            "sourcePort": source.get("port"),
+            "feedMode": feed,
+            "sourceId": item.get("sourceId") or "",
+            "listenerPort": item.get("listenerPort"),
+            "relay": item.get("relay") or "",
+            "mediamtxPath": item.get("mediamtxPath") or "",
+            "forwardUrl": item.get("forwardUrl") or "",
+            "sourceLabel": feed_detail,
+            "sourcePort": feed_port,
             "latencyMs": item["latencyMs"],
             "lossmaxttl": item["lossmaxttl"],
             "running": run["running"],
@@ -1344,7 +1650,7 @@ def srtla_public() -> dict:
             "sender": sender,
             "log": read_log(item["id"], "-srtla", 40),
             "stats": parsed,
-            "notes": srtla_notes(run["running"], run["error"], listener_errors.get(item["sourceId"]), parsed),
+            "notes": srtla_notes(run["running"], run["error"], backend_error(item), parsed),
         })
     if samples:
         with lock:
@@ -2217,6 +2523,26 @@ def collect_stats() -> tuple[dict[str, bool], dict[str, dict]]:
     return ready, stats
 
 
+def srtla_virtual_sources() -> list[dict]:
+    seen = {item["id"] for item in catalog}
+    virtual = []
+    for receiver in srtla_receivers:
+        if srtla_feed_mode(receiver) != "custom" or receiver.get("relay") != "mediamtx":
+            continue
+        path_id = str(receiver.get("mediamtxPath") or "").strip()
+        if not path_id or path_id in seen:
+            continue
+        seen.add(path_id)
+        virtual.append({
+            "id": path_id,
+            "label": f"{receiver['label']} (SRTLA)",
+            "mode": "caller",
+            "url": "",
+            "port": None,
+        })
+    return virtual
+
+
 def snapshot() -> dict:
     ready, stats = collect_stats()
     handle_output_signal_transitions(ready)
@@ -2273,6 +2599,7 @@ def snapshot() -> dict:
             "previewError": run["preview_error"],
             "stats": stats.get(slot["source"]) if slot["source"] else None,
         }
+    all_sources = list(catalog) + srtla_virtual_sources()
     return {
         "auth": auth_enabled(),
         "user": None,
@@ -2289,7 +2616,7 @@ def snapshot() -> dict:
                 "whep": f"{web}/{urllib.parse.quote(source['id'])}/whep",
                 "routedTo": routed.get(source["id"], []),
             }
-            for source in catalog
+            for source in all_sources
         ],
         "slots": slots_out,
         "slotOrder": list(SLOTS.keys()),
@@ -2968,6 +3295,9 @@ def main() -> None:
         for item in catalog:
             if item.get("mode") == "listener":
                 start_listener(item["id"])
+        for item in srtla_receivers:
+            if srtla_feed_mode(item) == "custom" and item.get("relay") == "mediamtx":
+                ensure_publisher_path(str(item["mediamtxPath"]))
         for item in srtla_receivers:
             start_srtla(item["id"])
     state = load_state()

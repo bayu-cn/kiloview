@@ -125,9 +125,33 @@
           <input name="port" type="number" min="1024" max="65535" inputmode="numeric" required>
           <span class="field-note">The encoder calls this port. Open it on the firewall. It is not the listener input port.</span>
         </label>
-        <label>Listener input
-          <select name="sourceId" required></select>
-          <span class="field-note">srtla_rec connects to that input on this machine. Add a listener input first if the list is empty.</span>
+        <label>Feed
+          <select name="feedMode" required>
+            <option value="route">Route listener input (existing)</option>
+            <option value="custom">Custom listener port</option>
+          </select>
+        </label>
+        <label data-field="srtla-route">Route listener input
+          <select name="sourceId"></select>
+          <span class="field-note">Uses the FFmpeg listener from Inputs. Stream appears in Route like any other input.</span>
+        </label>
+        <label data-field="srtla-custom-port" hidden>Custom SRT listener port
+          <input name="listenerPort" type="number" min="1024" max="65535" inputmode="numeric">
+          <span class="field-note">srtla_rec connects here on this machine. Not tied to Inputs unless you choose MediaMTX below.</span>
+        </label>
+        <label data-field="srtla-relay" hidden>Then send MPEG-TS to
+          <select name="relay">
+            <option value="mediamtx">MediaMTX path (preview + SDI/SRT/NDI route)</option>
+            <option value="forward">Another device (SRT caller URL)</option>
+          </select>
+        </label>
+        <label data-field="srtla-mediamtx" hidden>MediaMTX path ID
+          <input name="mediamtxPath" pattern="[A-Za-z0-9][A-Za-z0-9_-]{0,40}" maxlength="41">
+          <span class="field-note">New path ID (not already in Inputs). Drag this path in Route after it goes live.</span>
+        </label>
+        <label data-field="srtla-forward" hidden>Forward SRT URL
+          <input name="forwardUrl" maxlength="300" placeholder="srt://host:port">
+          <span class="field-note">Operator copies MPEG-TS to this caller URL (decoder, vMix, etc.).</span>
         </label>
         <label>SRT latency (ms)
           <input name="latencyMs" type="number" min="120" max="8000" value="2000" required>
