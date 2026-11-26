@@ -821,7 +821,7 @@ def restart_listener_later(source_id: str, generation: int) -> None:
             return
         if not any(item["id"] == source_id and item.get("mode") == "listener" for item in catalog):
             return
-        start_listener(source_id)
+    start_listener(source_id)
 
 
 def sync_listener(previous: dict | None, item: dict) -> str | None:
@@ -1385,7 +1385,8 @@ def restart_srtla_relay_later(receiver_id: str, generation: int) -> None:
         item = next((entry for entry in srtla_receivers if entry["id"] == receiver_id), None)
         if item is None or srtla_is_internal(item):
             return
-        start_srtla_relay(item)
+        item_copy = dict(item)
+    start_srtla_relay(item_copy)
 
 
 def stop_srtla(receiver_id: str) -> None:
@@ -1503,7 +1504,7 @@ def restart_srtla_later(receiver_id: str, generation: int) -> None:
             return
         if not any(item["id"] == receiver_id for item in srtla_receivers):
             return
-        start_srtla(receiver_id)
+    start_srtla(receiver_id)
 
 
 def restart_listener_if_present(source_id: str) -> str | None:
@@ -1513,6 +1514,14 @@ def restart_listener_if_present(source_id: str) -> str | None:
 
 
 def store_srtla(receiver_id: str | None, payload: dict) -> str | None:
+    listener_error = None
+    mediamtx_error = None
+    srtla_error = None
+    restart_old_source: str | None = None
+    restart_new_source: str | None = None
+    srtla_start_id: str | None = None
+    mediamtx_path: str | None = None
+    changed = False
     with lock:
         previous = None
         if receiver_id is not None:
@@ -1535,22 +1544,27 @@ def store_srtla(receiver_id: str | None, payload: dict) -> str | None:
             "srtMode", "remoteHost", "remotePort", "forwardPort", "streamid", "passphrase",
         )
         changed = previous is None or any(previous.get(key) != item.get(key) for key in track)
-        listener_error = None
-        mediamtx_error = None
         if changed and old_source and old_source != item.get("sourceId"):
-            listener_error = restart_listener_if_present(old_source)
+            restart_old_source = old_source
         if changed:
             if srtla_is_internal(item) and item.get("relay") != "mediamtx":
-                listener_error = restart_listener_if_present(item["sourceId"]) or listener_error
-            try:
-                write_mediamtx()
-            except OSError:
-                pass
+                restart_new_source = str(item.get("sourceId") or "")
             if item.get("relay") == "mediamtx" and item.get("mediamtxPath"):
-                mediamtx_error = ensure_publisher_path(str(item["mediamtxPath"]))
-            srtla_error = start_srtla(item["id"])
-        else:
-            srtla_error = None
+                mediamtx_path = str(item["mediamtxPath"])
+            srtla_start_id = item["id"]
+    if changed:
+        try:
+            write_mediamtx()
+        except OSError:
+            pass
+    if restart_old_source:
+        listener_error = restart_listener_if_present(restart_old_source)
+    if restart_new_source:
+        listener_error = restart_listener_if_present(restart_new_source) or listener_error
+    if mediamtx_path:
+        mediamtx_error = ensure_publisher_path(mediamtx_path)
+    if srtla_start_id:
+        srtla_error = start_srtla(srtla_start_id)
     return listener_error or mediamtx_error or srtla_error
 
 
@@ -1559,15 +1573,16 @@ def remove_srtla(receiver_id: str) -> None:
         item = next((entry for entry in srtla_receivers if entry["id"] == receiver_id), None)
         if item is None:
             raise ValueError("Unknown SRTLA receiver.")
-        stop_srtla(receiver_id)
         srtla_receivers[:] = [entry for entry in srtla_receivers if entry["id"] != receiver_id]
         save_srtla()
-        if srtla_is_internal(item):
-            restart_listener_if_present(item.get("sourceId") or "")
-        try:
-            write_mediamtx()
-        except OSError:
-            pass
+        item_copy = dict(item)
+    stop_srtla(receiver_id)
+    if srtla_is_internal(item_copy):
+        restart_listener_if_present(item_copy.get("sourceId") or "")
+    try:
+        write_mediamtx()
+    except OSError:
+        pass
 
 
 def scrape_metrics(port: int) -> str | None:
@@ -2269,7 +2284,7 @@ def restart_later(slot_id: str, generation: int) -> None:
         run = runtime[slot_id]
         if run["generation"] != generation or not state[slot_id]["source"]:
             return
-        restart_slot_pipeline(slot_id)
+    restart_slot_pipeline(slot_id)
 
 
 def stop_preview(run: dict) -> None:
@@ -2341,7 +2356,7 @@ def restart_preview_later(slot_id: str, generation: int) -> None:
         run = runtime[slot_id]
         if run.get("preview_generation") != generation or not state[slot_id]["source"]:
             return
-        start_preview(slot_id)
+    start_preview(slot_id)
 
 
 def stop_all() -> None:
@@ -2377,6 +2392,8 @@ _flow_marks: dict[str, tuple[int, float]] = {}
 _stall_clear_since: dict[str, float] = {}
 _source_ready_prev: dict[str, bool] = {}
 _output_stall_since: dict[str, float] = {}
+_output_recover_cooldown: dict[str, float] = {}
+OUTPUT_RECOVER_COOLDOWN_SECONDS = 2.0
 
 
 def stall_seconds() -> float:
@@ -2549,6 +2566,10 @@ def handle_output_signal_transitions(ready: dict[str, bool]) -> None:
                     to_restart.add(slot_id)
             _source_ready_prev[source_id] = now_ready
     for slot_id in to_restart:
+        last = _output_recover_cooldown.get(slot_id, 0.0)
+        if now - last < OUTPUT_RECOVER_COOLDOWN_SECONDS:
+            continue
+        _output_recover_cooldown[slot_id] = now
         restart_slot_pipeline(slot_id)
 
 
@@ -2565,6 +2586,7 @@ def maybe_auto_clear_stalled(ready: dict[str, bool]) -> None:
         return
     now = time.monotonic()
     window = stall_clear_seconds()
+    cleared: list[str] = []
     with lock:
         for slot_id in list(SLOTS.keys()):
             slot = state.get(slot_id)
@@ -2597,7 +2619,9 @@ def maybe_auto_clear_stalled(ready: dict[str, bool]) -> None:
             if run:
                 run["restarts"] = 0
                 run["preview_restarts"] = 0
-            start_pipeline(slot_id)
+            cleared.append(slot_id)
+    for slot_id in cleared:
+        start_pipeline(slot_id)
 
 
 def as_int(value: object) -> int:
@@ -2980,8 +3004,7 @@ def add_source(payload: dict) -> str | None:
         save_catalog()
     write_mediamtx()
     warning = publish_source(item, replace=True)
-    with lock:
-        listen_error = sync_listener(None, item)
+    listen_error = sync_listener(None, item)
     return warning or listen_error
 
 
@@ -3008,9 +3031,9 @@ def update_source(source_id: str, payload: dict) -> str | None:
     if source_changed:
         write_mediamtx()
         warning = publish_source(item, replace=True)
-    with lock:
-        listen_error = sync_listener(previous, item)
-        srtla_error = start_srtla(bound_id) if port_changed and bound_id else None
+    restart_srtla_id = bound_id if port_changed and bound_id else None
+    listen_error = sync_listener(previous, item)
+    srtla_error = start_srtla(restart_srtla_id) if restart_srtla_id else None
     return warning or listen_error or srtla_error
 
 
@@ -3062,7 +3085,7 @@ def delete_source(source_id: str) -> None:
     mediamtx_call("DELETE", f"/v3/config/paths/delete/{quoted}")
 
 
-def apply_slot(slot_id: str, payload: dict, is_admin: bool = False) -> None:
+def apply_slot(slot_id: str, payload: dict, is_admin: bool = False) -> bool:
     slot = state[slot_id]
     if slot.get("locked") and not is_admin:
         raise ValueError("This output is locked.")
@@ -3093,7 +3116,7 @@ def apply_slot(slot_id: str, payload: dict, is_admin: bool = False) -> None:
         _stall_clear_since.pop(slot_id, None)
         runtime[slot_id]["restarts"] = 0
         runtime[slot_id]["preview_restarts"] = 0
-        start_pipeline(slot_id)
+    return routed
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -3204,10 +3227,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             with lock:
-                apply_slot(slot_id, payload, bool(session.get("admin")))
+                restart_pipeline = apply_slot(slot_id, payload, bool(session.get("admin")))
         except ValueError as exc:
             self.send_json(400, {"error": str(exc)})
             return
+        if restart_pipeline:
+            start_pipeline(slot_id)
         self.send_json(200, with_session(snapshot(), session))
 
     def read_json(self) -> dict:
@@ -3261,7 +3286,12 @@ class Handler(BaseHTTPRequestHandler):
         if session is None:
             self.send_json(401, {"error": "Login required."})
             return
-        self.send_json(200, with_session(snapshot(), session))
+        started = time.monotonic()
+        body = with_session(snapshot(), session)
+        elapsed = time.monotonic() - started
+        if elapsed >= 3.0:
+            print(f"snapshot /api/state slow: {elapsed:.1f}s", flush=True)
+        self.send_json(200, body)
 
     def handle_decklink(self) -> None:
         session = current_session(self)
@@ -3354,7 +3384,7 @@ class Handler(BaseHTTPRequestHandler):
                 with lock:
                     if not any(item["id"] == receiver_id for item in srtla_receivers):
                         raise ValueError("Unknown SRTLA receiver.")
-                    warning = start_srtla(receiver_id)
+                warning = start_srtla(receiver_id)
             else:
                 receiver_id = urllib.parse.unquote(path[len("/api/srtla/"):]).strip("/")
                 warning = store_srtla(receiver_id, self.read_json())
@@ -3495,20 +3525,27 @@ def main() -> None:
         print(f"MediaMTX config tidak tertulis: {exc}", flush=True)
     ensure_sources()
     ensure_outputs()
+    listener_ids: list[str] = []
+    mediamtx_paths: list[str] = []
+    srtla_ids: list[str] = []
     with lock:
         for item in catalog:
             if item.get("mode") == "listener":
-                start_listener(item["id"])
+                listener_ids.append(item["id"])
         for item in srtla_receivers:
-            if srtla_feed_mode(item) == "custom" and item.get("relay") == "mediamtx":
-                ensure_publisher_path(str(item["mediamtxPath"]))
-        for item in srtla_receivers:
-            start_srtla(item["id"])
+            if srtla_feed_mode(item) == "custom" and item.get("relay") == "mediamtx" and item.get("mediamtxPath"):
+                mediamtx_paths.append(str(item["mediamtxPath"]))
+            srtla_ids.append(item["id"])
+    for source_id in listener_ids:
+        start_listener(source_id)
+    for path_name in mediamtx_paths:
+        ensure_publisher_path(path_name)
+    for receiver_id in srtla_ids:
+        start_srtla(receiver_id)
     state = load_state()
-    with lock:
-        for slot_id, slot in state.items():
-            if slot["source"]:
-                start_pipeline(slot_id)
+    pipeline_slots = [slot_id for slot_id, slot in state.items() if slot["source"]]
+    for slot_id in pipeline_slots:
+        start_pipeline(slot_id)
     signal.signal(signal.SIGTERM, lambda *_: stop_and_exit())
     signal.signal(signal.SIGINT, lambda *_: stop_and_exit())
     host = cfg("BIND", "0.0.0.0")

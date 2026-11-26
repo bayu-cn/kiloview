@@ -27,6 +27,9 @@ const srtlaBinary = document.querySelector("#srtla-binary");
 const srtlaFormNote = document.querySelector("#srtla-form-note");
 
 let state = null;
+let tickBusy = false;
+let statePollFails = 0;
+const STATE_TIMEOUT_MS = 12000;
 let srtlaState = null;
 let srtlaKey = "";
 let srtlaGen = 0;
@@ -190,18 +193,32 @@ function esc(value) {
 }
 
 async function api(path, options = {}) {
-  const res = await fetch(path, {
-    credentials: "same-origin",
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options,
-  });
-  if (res.status === 401) {
-    location.href = "/login";
-    return null;
+  const timeoutMs = options.timeoutMs || 0;
+  const { timeoutMs: _drop, ...fetchOptions } = options;
+  const controller = timeoutMs > 0 ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const res = await fetch(path, {
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...(fetchOptions.headers || {}) },
+      ...fetchOptions,
+      signal: controller ? controller.signal : fetchOptions.signal,
+    });
+    if (res.status === 401) {
+      location.href = "/login";
+      return null;
+    }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || "Request failed");
+    return body;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || "Request failed");
-  return body;
+}
+
+function statePayloadOk(next) {
+  if (!next || !Array.isArray(next.sources) || !next.slots) return false;
+  return Object.keys(next.slots).length > 0;
 }
 
 function badge(source) {
@@ -537,7 +554,17 @@ function shell() {
   bindListReorder();
 }
 
+function layoutNeedsRebuild() {
+  if (!state) return false;
+  const wantSources = state.sources.length;
+  const haveSources = sourcesEl.querySelectorAll(".card").length;
+  const wantSlots = slotIds().length;
+  const haveSlots = slotsEl.querySelectorAll(".slot").length;
+  return wantSources !== haveSources || wantSlots !== haveSlots;
+}
+
 function paint() {
+  if (layoutNeedsRebuild()) shell();
   const routed = {};
   Object.entries(state.slots).forEach(([id, slot]) => {
     if (!slot.source) return;
@@ -548,6 +575,7 @@ function paint() {
   state.sources.forEach((source) => {
     source.routedTo = routed[source.id] || [];
     const card = sourcesEl.querySelector(`[data-source="${source.id}"]`);
+    if (!card) return;
     card.classList.toggle("onair", source.routedTo.length > 0);
     const [kind, text] = badge(source);
     const badgeEl = card.querySelector("[data-badge]");
@@ -572,6 +600,7 @@ function paint() {
 
   Object.entries(state.slots).forEach(([id, slot]) => {
     const box = slotsEl.querySelector(`[data-slot="${id}"]`);
+    if (!box) return;
     const held = slot.locked && !state.admin;
     box.classList.toggle("playing", slot.status === "playing");
     box.classList.toggle("locked", !!slot.locked);
@@ -593,13 +622,15 @@ function paint() {
     const mode = box.querySelector("[data-mode]");
     const audio = box.querySelector("[data-audio]");
     const passthrough = slot.kind && slot.kind !== "sdi";
-    mode.closest("label").hidden = passthrough;
-    audio.closest("label").hidden = passthrough;
-    if (!passthrough && document.activeElement !== mode) mode.value = slot.mode;
-    if (!passthrough && document.activeElement !== audio) audio.value = slot.audio;
+    const modeLabel = mode ? mode.closest("label") : null;
+    const audioLabel = audio ? audio.closest("label") : null;
+    if (modeLabel) modeLabel.hidden = passthrough;
+    if (audioLabel) audioLabel.hidden = passthrough;
+    if (!passthrough && mode && document.activeElement !== mode) mode.value = slot.mode;
+    if (!passthrough && audio && document.activeElement !== audio) audio.value = slot.audio;
     const busy = slot.status === "starting";
-    mode.disabled = busy || held;
-    audio.disabled = busy || held;
+    if (mode) mode.disabled = busy || held;
+    if (audio) audio.disabled = busy || held;
     box.querySelector("[data-clear]").disabled = busy || held || !slot.source;
     box.querySelector("[data-remove]").disabled = !!slot.source;
     const log = box.querySelector("[data-log]");
@@ -887,9 +918,16 @@ function applyRole() {
 }
 
 async function tick() {
+  if (tickBusy) return;
+  tickBusy = true;
   try {
-    const next = await api("/api/state");
+    const next = await api("/api/state", { timeoutMs: STATE_TIMEOUT_MS });
     if (!next) return;
+    if (!statePayloadOk(next)) {
+      statePollFails += 1;
+      return;
+    }
+    statePollFails = 0;
     const changed = !state || layoutKey(state) !== layoutKey(next);
     if (!state) {
       state = next;
@@ -909,7 +947,11 @@ async function tick() {
     checkStalls();
     if (document.body.classList.contains("view-srtla")) refreshSrtla();
   } catch (error) {
+    statePollFails += 1;
     console.error(error);
+    if (state && layoutNeedsRebuild()) shell();
+  } finally {
+    tickBusy = false;
   }
 }
 
