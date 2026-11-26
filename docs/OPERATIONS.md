@@ -52,6 +52,9 @@ Output **tetap** menempel kecuali auto-clear aktif. Di `config.env` server:
 | `OUTPUT_RESTART_ON_RECOVER_LOCKED` | `1` = recover restart hanya output **Locked**. |
 | `OUTPUT_RESTART_DELAY_SECONDS` | Jeda sebelum restart output (default **0.4**, dulu hardcoded 2). |
 | `OUTPUT_PLAYING_GRACE_SECONDS` | Tunggu sebelum status On air setelah start (default **0.6**). |
+| `OUTPUT_KEEP_PREVIEW_ON_RECOVER` | `1` = tidak restart FFmpeg monitor Listen saat SDI recover (default **0** = restart supaya suara Listen ikut pulih). |
+
+Tombol **Listen** di kartu output hanya untuk **dengar di browser** (bukan level audio SDI). Klik **Listen** lalu naikkan slider volume; SDI tidak mengikuti volume browser.
 
 Output **Locked** tidak pernah auto-Clear. Auto-clear tidak jalan kalau pipeline output masih **On air** (GStreamer jalan dan ada gambar ke SDI), walaupun badge input sempat **no signal** (byte MediaMTX macet). Setelah ubah env: `docker restart operator`.
 

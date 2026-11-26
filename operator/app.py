@@ -2269,7 +2269,7 @@ def restart_later(slot_id: str, generation: int) -> None:
         run = runtime[slot_id]
         if run["generation"] != generation or not state[slot_id]["source"]:
             return
-        restart_slot_pipeline(slot_id, restart_preview=False)
+        restart_slot_pipeline(slot_id)
 
 
 def stop_preview(run: dict) -> None:
@@ -2440,6 +2440,11 @@ def output_playing_grace_seconds() -> float:
         return 0.6
 
 
+def output_keep_preview_on_recover() -> bool:
+    """When true, browser Listen keeps the old FFmpeg preview across output restarts (may lose audio)."""
+    return _env_flag("OUTPUT_KEEP_PREVIEW_ON_RECOVER", "0")
+
+
 def stall_clear_seconds() -> float:
     raw = cfg("SIGNAL_STALL_AUTO_CLEAR_SECONDS")
     if not raw:
@@ -2479,7 +2484,9 @@ def stall_auto_clear_enabled() -> bool:
     return cfg("SIGNAL_STALL_AUTO_CLEAR", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def restart_slot_pipeline(slot_id: str, *, restart_preview: bool = False) -> None:
+def restart_slot_pipeline(slot_id: str, *, restart_preview: bool | None = None) -> None:
+    if restart_preview is None:
+        restart_preview = not output_keep_preview_on_recover()
     with lock:
         if slot_id not in SLOTS or not state.get(slot_id, {}).get("source"):
             return
