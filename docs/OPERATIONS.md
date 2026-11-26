@@ -48,7 +48,10 @@ Output **tetap** menempel kecuali auto-clear aktif. Di `config.env` server:
 | `RTSP_OUTPUT_LATENCY_MS` | Buffer `rtspsrc` ke SDI/NDI (default **1200** ms, max 3000). |
 | `OUTPUT_RESTART_ON_STALL` | `1` = restart pipeline setelah stall lama (default on). |
 | `OUTPUT_STALL_RESTART_SECONDS` | Stall berapa detik sebelum restart output (default **25**, terpisah dari badge `SIGNAL_STALL_SECONDS`). |
-| `OUTPUT_RESTART_ON_RECOVER` | `1` = restart output saat input dari no signal jadi live lagi (default **off**). Berguna kalau SDI hitam padahal preview live; bisa lebih sering “Locking…”. |
+| `OUTPUT_RESTART_ON_RECOVER` | `1` = restart output saat input dari no signal jadi live lagi (default **off**). Preview browser tidak di-restart kalau masih jalan. |
+| `OUTPUT_RESTART_ON_RECOVER_LOCKED` | `1` = recover restart hanya output **Locked**. |
+| `OUTPUT_RESTART_DELAY_SECONDS` | Jeda sebelum restart output (default **0.4**, dulu hardcoded 2). |
+| `OUTPUT_PLAYING_GRACE_SECONDS` | Tunggu sebelum status On air setelah start (default **0.6**). |
 
 Output **Locked** tidak pernah auto-Clear. Auto-clear tidak jalan kalau pipeline output masih **On air** (GStreamer jalan dan ada gambar ke SDI), walaupun badge input sempat **no signal** (byte MediaMTX macet). Setelah ubah env: `docker restart operator`.
 

@@ -2138,7 +2138,23 @@ def useful_log(slot_id: str, suffix: str = "") -> str:
     return "\n".join(text.splitlines()[-6:])
 
 
-def start_pipeline(slot_id: str) -> None:
+def preview_live(slot_id: str) -> bool:
+    run = runtime.get(slot_id)
+    if not run:
+        return False
+    proc = run.get("preview")
+    return proc is not None and proc.poll() is None
+
+
+def ensure_preview(slot_id: str) -> None:
+    if not state.get(slot_id, {}).get("source"):
+        return
+    if preview_live(slot_id):
+        return
+    start_preview(slot_id)
+
+
+def start_output_pipeline(slot_id: str) -> None:
     run = runtime[slot_id]
     proc = run["proc"]
     if proc is not None and proc.poll() is None:
@@ -2147,14 +2163,6 @@ def start_pipeline(slot_id: str) -> None:
     run["generation"] += 1
     generation = run["generation"]
     slot = state[slot_id]
-    if not slot["source"]:
-        stop_preview(run)
-        run["status"] = "empty"
-        run["error"] = None
-        run["restarts"] = 0
-        run["preview_error"] = None
-        run["preview_restarts"] = 0
-        return
 
     LOG_DIR.mkdir(exist_ok=True)
     log_path = LOG_DIR / f"{slot_id}.log"
@@ -2162,13 +2170,13 @@ def start_pipeline(slot_id: str) -> None:
     if kind == "ndi" and not gst_has_element("ndisink"):
         run["status"] = "error"
         run["error"] = "NDI output needs the NDI plugin (ndisink) and the NDI runtime on this server."
-        start_preview(slot_id)
+        ensure_preview(slot_id)
         return
     args = output_args(slot_id)
     if not args:
         run["status"] = "error"
         run["error"] = "This output needs FFmpeg in the operator image."
-        start_preview(slot_id)
+        ensure_preview(slot_id)
         return
     log = open(log_path, "w", encoding="utf-8")
     log.write(" ".join(args) + "\n\n")
@@ -2185,7 +2193,7 @@ def start_pipeline(slot_id: str) -> None:
         log.close()
         run["status"] = "error"
         run["error"] = str(exc)
-        start_preview(slot_id)
+        ensure_preview(slot_id)
         return
     log.close()
     run["proc"] = proc
@@ -2193,11 +2201,29 @@ def start_pipeline(slot_id: str) -> None:
     run["error"] = None
     threading.Thread(target=watch_pipeline, args=(slot_id, generation, proc), daemon=True).start()
     threading.Thread(target=mark_playing, args=(slot_id, generation, proc), daemon=True).start()
-    start_preview(slot_id)
+
+
+def start_pipeline(slot_id: str) -> None:
+    run = runtime[slot_id]
+    slot = state[slot_id]
+    if not slot["source"]:
+        proc = run["proc"]
+        if proc is not None and proc.poll() is None:
+            kill_process(proc)
+        run["proc"] = None
+        stop_preview(run)
+        run["status"] = "empty"
+        run["error"] = None
+        run["restarts"] = 0
+        run["preview_error"] = None
+        run["preview_restarts"] = 0
+        return
+    start_output_pipeline(slot_id)
+    ensure_preview(slot_id)
 
 
 def mark_playing(slot_id: str, generation: int, proc: subprocess.Popen) -> None:
-    time.sleep(1.2)
+    time.sleep(output_playing_grace_seconds())
     with lock:
         run = runtime[slot_id]
         if run["generation"] != generation or run["proc"] is not proc:
@@ -2238,12 +2264,12 @@ def watch_pipeline(slot_id: str, generation: int, proc: subprocess.Popen) -> Non
 
 
 def restart_later(slot_id: str, generation: int) -> None:
-    time.sleep(2)
+    time.sleep(output_restart_delay_seconds())
     with lock:
         run = runtime[slot_id]
         if run["generation"] != generation or not state[slot_id]["source"]:
             return
-        start_pipeline(slot_id)
+        restart_slot_pipeline(slot_id, restart_preview=False)
 
 
 def stop_preview(run: dict) -> None:
@@ -2310,7 +2336,7 @@ def watch_preview(slot_id: str, generation: int, proc: subprocess.Popen) -> None
 
 
 def restart_preview_later(slot_id: str, generation: int) -> None:
-    time.sleep(2)
+    time.sleep(output_restart_delay_seconds())
     with lock:
         run = runtime[slot_id]
         if run.get("preview_generation") != generation or not state[slot_id]["source"]:
@@ -2390,6 +2416,30 @@ def output_restart_on_recover_enabled() -> bool:
     return _env_flag("OUTPUT_RESTART_ON_RECOVER", "0")
 
 
+def output_restart_on_recover_locked_only() -> bool:
+    return _env_flag("OUTPUT_RESTART_ON_RECOVER_LOCKED", "0")
+
+
+def output_restart_delay_seconds() -> float:
+    raw = cfg("OUTPUT_RESTART_DELAY_SECONDS")
+    if not raw:
+        return 0.4
+    try:
+        return max(0.0, min(5.0, float(raw)))
+    except (TypeError, ValueError):
+        return 0.4
+
+
+def output_playing_grace_seconds() -> float:
+    raw = cfg("OUTPUT_PLAYING_GRACE_SECONDS")
+    if not raw:
+        return 0.6
+    try:
+        return max(0.0, min(5.0, float(raw)))
+    except (TypeError, ValueError):
+        return 0.6
+
+
 def stall_clear_seconds() -> float:
     raw = cfg("SIGNAL_STALL_AUTO_CLEAR_SECONDS")
     if not raw:
@@ -2429,14 +2479,19 @@ def stall_auto_clear_enabled() -> bool:
     return cfg("SIGNAL_STALL_AUTO_CLEAR", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def restart_slot_pipeline(slot_id: str) -> None:
+def restart_slot_pipeline(slot_id: str, *, restart_preview: bool = False) -> None:
     with lock:
         if slot_id not in SLOTS or not state.get(slot_id, {}).get("source"):
             return
         run = runtime.setdefault(slot_id, fresh_runtime(True))
         run["restarts"] = 0
-        run["preview_restarts"] = 0
-    start_pipeline(slot_id)
+        if restart_preview:
+            run["preview_restarts"] = 0
+    start_output_pipeline(slot_id)
+    if restart_preview:
+        start_preview(slot_id)
+    else:
+        ensure_preview(slot_id)
 
 
 def handle_output_signal_transitions(ready: dict[str, bool]) -> None:
@@ -2477,14 +2532,14 @@ def handle_output_signal_transitions(ready: dict[str, bool]) -> None:
         for source_id in catalog_ids:
             was = _source_ready_prev.get(source_id, ready.get(source_id, False))
             now_ready = ready.get(source_id, False)
-            if (
-                output_restart_on_recover_enabled()
-                and not was
-                and now_ready
-            ):
+            if output_restart_on_recover_enabled() and not was and now_ready:
+                locked_only = output_restart_on_recover_locked_only()
                 for slot_id, slot in state.items():
-                    if slot.get("source") == source_id:
-                        to_restart.add(slot_id)
+                    if slot.get("source") != source_id:
+                        continue
+                    if locked_only and not slot.get("locked"):
+                        continue
+                    to_restart.add(slot_id)
             _source_ready_prev[source_id] = now_ready
     for slot_id in to_restart:
         restart_slot_pipeline(slot_id)
